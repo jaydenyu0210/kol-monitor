@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KOL Monitor Dashboard (Test)</title>
+<style>
+body { font-family: sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; }
+h1 { font-size: 24px; font-weight: bold; }
+</style>
+</head>
+<body>
+  <h1>Hello! Dashboard is running.</h1>
+  <p>If you see this, the server is working. The full dashboard might have trouble loading resources.</p>
+  <p id="time"></p>
+
+<script>
+document.getElementById('time').textContent = 'Current time: ' + new Date().toLocaleTimeString();
+</script>
+</body>
+</html>

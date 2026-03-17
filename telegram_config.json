@@ -1,0 +1,25 @@
+{
+  "bot_token": "8679446475:AAFfMPO6zbEHYBJdWE2auTOL0cIZx-MTu40",
+  "groups": {
+    "posts": {
+      "chat_id": -5288557456,
+      "name": "监控KOL帖子"
+    },
+    "interactions": {
+      "chat_id": -5212697144,
+      "name": "监控KOL评论互动对象"
+    },
+    "following": {
+      "chat_id": -5255051605,
+      "name": "监控KOL关注列表"
+    },
+    "followers": {
+      "chat_id": -5148521878,
+      "name": "监控KOL关注者列表"
+    },
+    "metrics": {
+      "chat_id": -4982741367,
+      "name": "监控KOL个人主页URL数据表现"
+    }
+  }
+}

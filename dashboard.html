@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KOL Monitor Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+  body { font-family: 'Inter', sans-serif; background: #0f172a; color: #e2e8f0; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; }
+  .card-glow { box-shadow: 0 0 20px rgba(59, 130, 246, 0.1); }
+  .stat-card:hover { transform: translateY(-2px); transition: all 0.2s; }
+  .tab-active { background: #3b82f6; color: white; }
+  .tab-inactive { background: #1e293b; color: #94a3b8; }
+  .tab-inactive:hover { background: #334155; }
+  .table-row:hover { background: #334155; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: 500; }
+  .badge-ai { background: #7c3aed20; color: #a78bfa; }
+  .badge-tech { background: #059b9520; color: #2dd4bf; }
+  .badge-vc { background: #f59e0b20; color: #fbbf24; }
+  .badge-product { background: #3b82f620; color: #60a5fa; }
+  .badge-journalism { background: #ef444420; color: #f87171; }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: #1e293b; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+  .pulse { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .modal-overlay { background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); }
+</style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="min-h-screen">
+
+  <!-- Login Overlay -->
+  <div id="loginOverlay" class="fixed inset-0 bg-slate-950 z-[200] flex items-center justify-center p-4">
+    <div class="card p-8 w-full max-w-md border-t-4 border-t-blue-500 shadow-2xl">
+      <div class="flex flex-col items-center mb-8">
+        <div class="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-blue-500/20">
+          <i data-lucide="shield-check" class="text-white w-10 h-10"></i>
+        </div>
+        <h1 class="text-2xl font-black text-white tracking-tight">KOL MONITOR <span class="text-blue-500">PRO</span></h1>
+        <p class="text-slate-500 text-sm">Sign in to your dashboard</p>
+      </div>
+
+      <div id="loginForm" class="space-y-4">
+        <div>
+          <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Username</label>
+          <input id="loginUser" type="text" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white focus:border-blue-500 focus:outline-none transition">
+        </div>
+        <div>
+          <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Password</label>
+          <input id="loginPass" type="password" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white focus:border-blue-500 focus:outline-none transition">
+        </div>
+        <button onclick="handleLogin()" id="loginBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-3 font-bold transition flex items-center justify-center gap-2">
+          Login Account
+        </button>
+        <p class="text-center text-xs text-slate-600 mt-4">
+          Need an account? <a href="#" onclick="toggleAuthMode()" class="text-blue-500 hover:underline">Register here</a>
+        </p>
+      </div>
+
+      <div id="registerForm" class="space-y-4 hidden">
+        <div>
+          <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Username</label>
+          <input id="regUser" type="text" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white focus:border-blue-500 focus:outline-none transition">
+        </div>
+        <div>
+          <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Email</label>
+          <input id="regEmail" type="email" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white focus:border-blue-500 focus:outline-none transition">
+        </div>
+        <div>
+          <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Password</label>
+          <input id="regPass" type="password" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white focus:border-blue-500 focus:outline-none transition">
+        </div>
+        <button onclick="handleRegister()" id="regBtn" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg py-3 font-bold transition flex items-center justify-center gap-2">
+          Create Account
+        </button>
+        <p class="text-center text-xs text-slate-600 mt-4">
+          Already have an account? <a href="#" onclick="toggleAuthMode()" class="text-blue-500 hover:underline">Sign in</a>
+        </p>
+      </div>
+    </div>
+  </div>
+
+<div id="app" class="max-w-7xl mx-auto px-4 py-6">
+  
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-8">
+    <div>
+      <h1 class="text-2xl font-bold text-white flex items-center gap-3">
+        <span class="text-3xl">📡</span> KOL Monitor Dashboard
+      </h1>
+      <p class="text-sm text-slate-400 mt-1">LinkedIn & Twitter KOL Tracking System</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="lastUpdate" class="text-xs text-slate-500"></span>
+      <button onclick="refreshAll()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition">
+        🔄 Refresh
+      </button>
+      <button onclick="showAddKol()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition">
+        + Add KOL
+      </button>
+    </div>
+  </div>
+
+  <!-- Stats Cards -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <div class="card card-glow stat-card p-4 cursor-pointer" onclick="switchTab('overview')">
+      <div class="text-slate-400 text-xs font-medium mb-1">TOTAL KOLs</div>
+      <div id="statKols" class="text-2xl font-bold text-white">-</div>
+      <div class="text-xs text-emerald-400 mt-1">● Active</div>
+    </div>
+    <div class="card card-glow stat-card p-4 cursor-pointer" onclick="switchTab('posts')">
+      <div class="text-slate-400 text-xs font-medium mb-1">POSTS TODAY</div>
+      <div id="statPosts" class="text-2xl font-bold text-white">-</div>
+      <div id="statTotalPosts" class="text-xs text-slate-500 mt-1">total: -</div>
+    </div>
+    <div class="card card-glow stat-card p-4 cursor-pointer" onclick="switchTab('interactions')">
+      <div class="text-slate-400 text-xs font-medium mb-1">INTERACTIONS TODAY</div>
+      <div id="statInteractions" class="text-2xl font-bold text-white">-</div>
+      <div class="text-xs text-blue-400 mt-1">comments & likes</div>
+    </div>
+    <div class="card card-glow stat-card p-4 cursor-pointer" onclick="switchTab('connections')">
+      <div class="text-slate-400 text-xs font-medium mb-1">CONNECTION CHANGES</div>
+      <div id="statConnections" class="text-2xl font-bold text-white">-</div>
+      <div class="text-xs text-amber-400 mt-1">follow/unfollow</div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+
+    <div class="flex gap-2 mb-6 flex-wrap">
+    <button onclick="switchTab('overview')" id="tab-overview" class="tab-active px-4 py-2 rounded-lg text-sm font-medium transition">📊 Overview</button>
+    <button onclick="switchTab('posts')" id="tab-posts" class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">📝 Posts</button>
+    <button onclick="switchTab('interactions')" id="tab-interactions" class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">💬 Interactions</button>
+    <button onclick="switchTab('connections')" id="tab-connections" class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">🔗 Connections</button>
+    <button onclick="switchTab('metrics')" id="tab-metrics" class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">📈 Metrics</button>
+    <button onclick="switchTab('heatmaps')" id="tab-heatmaps" class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">🔥 X KOL Posts Heatmap</button>
+    <button onclick="switchTab('engagement')" id="tab-engagement" class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">⚡ Engagement Tracker</button>
+    <button onclick="switchTab('settings')" id="tab-settings" class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">⚙️ Settings</button>
+  </div>
+
+  <!-- Tab Content -->
+  <div id="content" class="card p-6 scrollbar-thin" style="min-height: 400px;">
+    <!-- Dynamic content loaded here -->
+  </div>
+</div>
+
+<!-- Add KOL Modal -->
+<div id="addKolModal" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
+  <div class="card p-6 w-full max-w-md mx-4">
+    <h3 class="text-lg font-bold text-white mb-4">Add New KOL</h3>
+    <form onsubmit="submitAddKol(event)">
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-slate-400">Name *</label>
+          <input id="addName" type="text" required class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none">
+        </div>
+        <div>
+          <label class="text-xs text-slate-400">Organization</label>
+          <input id="addOrg" type="text" class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none">
+        </div>
+        <div>
+          <label class="text-xs text-slate-400">Category</label>
+          <input id="addCategory" type="text" class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none" placeholder="AI VC / Tech Journalism / etc">
+        </div>
+        <div>
+          <label class="text-xs text-slate-400">LinkedIn URL</label>
+          <input id="addLinkedin" type="url" class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none" placeholder="https://linkedin.com/in/...">
+        </div>
+        <div>
+          <label class="text-xs text-slate-400">Twitter URL</label>
+          <input id="addTwitter" type="url" class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none" placeholder="https://x.com/...">
+        </div>
+        <div>
+          <label class="text-xs text-slate-400">Notes</label>
+          <textarea id="addNotes" rows="2" class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"></textarea>
+        </div>
+      </div>
+      <div class="flex gap-3 mt-4">
+        <button type="submit" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-2 text-sm font-medium transition">Add KOL</button>
+        <button type="button" onclick="hideAddKol()" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white rounded-lg py-2 text-sm font-medium transition">Cancel</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+const API = '/api';
+
+function getUserId() {
+  const uid = localStorage.getItem('kol_user_id') || 1;
+  if (uid == 1 && !localStorage.getItem('kol_user_id')) {
+    document.getElementById('loginOverlay').classList.remove('hidden');
+  } else {
+    document.getElementById('loginOverlay').classList.add('hidden');
+  }
+  return uid;
+}
+
+function toggleAuthMode() {
+  const isLogin = !document.getElementById('loginForm').classList.contains('hidden');
+  document.getElementById('loginForm').classList.toggle('hidden', isLogin);
+  document.getElementById('registerForm').classList.toggle('hidden', !isLogin);
+}
+
+async function handleLogin() {
+  const u = document.getElementById('loginUser').value;
+  const p = document.getElementById('loginPass').value;
+  const btn = document.getElementById('loginBtn');
+  
+  btn.innerText = "Verifying...";
+  btn.disabled = true;
+
+  try {
+    const data = await fetchJson('/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ username: u, password: p })
+    });
+    
+    localStorage.setItem('kol_user_id', data.id);
+    localStorage.setItem('kol_username', data.username);
+    document.getElementById('loginOverlay').classList.add('hidden');
+    refreshAll();
+  } catch (e) {
+    alert("Login failed: " + e.message);
+  } finally {
+    btn.innerText = "Login Account";
+    btn.disabled = false;
+  }
+}
+
+async function handleRegister() {
+  const u = document.getElementById('regUser').value;
+  const e = document.getElementById('regEmail').value;
+  const p = document.getElementById('regPass').value;
+  const btn = document.getElementById('regBtn');
+
+  if (!u || !p) { alert("Username and Password are required"); return; }
+
+  btn.innerText = "Creating...";
+  btn.disabled = true;
+
+  try {
+    const data = await fetchJson('/api/auth/register', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ username: u, email: e, password: p })
+    });
+    
+    alert("Account created! You can now login.");
+    toggleAuthMode();
+  } catch (e) {
+    alert("Registration failed: " + e.message);
+  } finally {
+    btn.innerText = "Create Account";
+    btn.disabled = false;
+  }
+}
+let currentTab = 'overview';
+let kolsData = [];
+
+// ---------- Tab Switching ----------
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('[id^="tab-"]').forEach(el => {
+    el.className = el.id === `tab-${tab}` ? 'tab-active px-4 py-2 rounded-lg text-sm font-medium transition' : 'tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition';
+  });
+  loadTabContent(tab);
+}
+
+async function loadTabContent(tab) {
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="text-center py-12 text-slate-500 pulse">Loading...</div>';
+  
+  switch(tab) {
+    case 'overview': await renderOverview(content); break;
+    case 'posts': await renderPosts(content); break;
+    case 'interactions': await renderInteractions(content); break;
+    case 'connections': await renderConnections(content); break;
+    case 'metrics': await renderMetrics(content); break;
+    case 'engagement': await renderEngagementTracker(content); break;
+    case 'settings': await renderSettings(content); break;
+    case 'heatmaps': await renderHeatmaps(content); break;
+  }
+}
+
+
+async function renderHeatmaps(el) {
+    el.innerHTML = `
+      <div class="card p-6 card-glow">
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-xl font-bold flex items-center text-white"><i data-lucide="bar-chart-2" class="mr-2 text-blue-400"></i> Historical X KOL Posts (Bubble Heatmap)</h2>
+          <button onclick="switchTab('heatmaps')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow-sm text-sm transition">Refresh Data</button>
+        </div>
+        <div class="text-sm text-slate-400 mb-6">
+          <p><strong>X-Axis:</strong> Timeline (Published Date) &nbsp;|&nbsp; <strong>Y-Axis:</strong> Views &nbsp;|&nbsp; <strong>Bubble Size:</strong> Engagement Rate ((Replies+Reposts+Likes+Bookmarks)/Views) &nbsp;|&nbsp; <strong>Bubble Color:</strong> Reposts + Bookmarks (darker/redder = higher value)</p>
+        </div>
+        <div id="heatmapContainer" class="space-y-8">
+            <p class="text-slate-400">Loading historical data...</p>
+        </div>
+      </div>
+    `;
+    lucide.createIcons();
+    
+    const container = document.getElementById('heatmapContainer');
+    try {
+        const data = await fetchJson('/api/twitter_posts?days=90&limit=5000');
+        const posts = data.posts;
+        
+        if (!posts || posts.length === 0) {
+            container.innerHTML = '<p class="text-slate-400">No historical posts found.</p>';
+            return;
+        }
+
+        const kols = {};
+        posts.forEach(p => {
+            if (!kols[p.kol_name]) kols[p.kol_name] = [];
+            kols[p.kol_name].push(p);
+        });
+
+        container.innerHTML = ''; 
+
+        for (const kolName of Object.keys(kols)) {
+            const kolPosts = kols[kolName];
+            let maxEngagement = 0;
+            
+            const datasets = [{
+                label: 'Posts',
+                data: kolPosts.map(p => {
+                    const views = p.views || Math.max(1, p.likes * 10);
+                    const engagementTotal = (p.likes || 0) + (p.reposts || 0) + (p.comments || 0) + (p.bookmarks || 0);
+                    const engagementRate = engagementTotal / views;
+                    if (engagementRate > maxEngagement) maxEngagement = engagementRate;
+                    
+                    const valueScore = (p.reposts || 0) + (p.bookmarks || 0);
+                    
+                    // Add small jitter to Y axis to prevent overlapping
+                    const jitter = (Math.random() - 0.5) * (views * 0.1); 
+                    
+                    return {
+                        x: new Date(p.posted_at || p.captured_at).getTime(),
+                        y: Math.max(1, views + jitter),
+                        r: engagementRate,
+                        valueScore: valueScore,
+                        raw: p
+                    };
+                }),
+                backgroundColor: function(context) {
+                    const val = context.raw?.valueScore || 0;
+                    const intensity = Math.min(1, val / 50); 
+                    const r = Math.round(59 + (239 - 59) * intensity);
+                    const g = Math.round(130 - (130 * intensity));
+                    const b = Math.round(246 - (246 * intensity));
+                    return `rgba(${r}, ${g}, ${b}, 0.5)`; // Increased transparency
+                },
+                borderColor: 'rgba(255,255,255,0.4)',
+                borderWidth: 1
+            }];
+
+            datasets[0].data.forEach(d => {
+                let radius = d.r / (maxEngagement || 1) * 20;
+                if (radius < 4) radius = 4;
+                d.r = radius;
+            });
+
+            let maxTime = new Date().getTime() + (24 * 60 * 60 * 1000);
+            let minTime = new Date().getTime() - 90 * 24 * 60 * 60 * 1000;
+            if (datasets[0].data.length > 0) {
+                minTime = Math.min(...datasets[0].data.map(d => d.x)) - (24 * 60 * 60 * 1000);
+                maxTime = Math.max(...datasets[0].data.map(d => d.x)) + (24 * 60 * 60 * 1000);
+            }
+            const daysCount = Math.max(1, (maxTime - minTime) / (24 * 60 * 60 * 1000));
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'bg-slate-800 p-4 rounded-lg border border-slate-700';
+            const chartId = `chart-${kolName.replace(/\W/g, '')}`;
+            wrapper.innerHTML = `<h3 class="font-bold text-lg mb-4 text-blue-300">${kolName}</h3><div style="height: 300px; position: relative;"><canvas id="${chartId}"></canvas></div>`;
+            container.appendChild(wrapper);
+
+            const ctx = document.getElementById(chartId).getContext('2d');
+            const myChart = new Chart(ctx, {
+                type: 'bubble',
+                data: { datasets: datasets },
+                
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    onClick: (e, elements, chart) => {
+                        if (elements.length > 0) {
+                            const datasetIndex = elements[0].datasetIndex;
+                            const index = elements[0].index;
+                            const post = chart.data.datasets[datasetIndex].data[index].raw;
+                            if (post.post_url) {
+                                window.open(post.post_url, '_blank');
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const p = context.raw.raw;
+                                    const dateStr = new Date(p.posted_at || p.captured_at).toLocaleString();
+                                    const viewsText = p.views ? p.views : (p.likes * 10) + ' (est.)';
+                                    return [
+                                        `Time: ${dateStr}`,
+                                        `Views: ${viewsText}, Likes: ${p.likes || 0}, Reposts: ${p.reposts || 0}, Replies: ${p.comments || 0}, Bookmarks: ${p.bookmarks || 0}`,
+                                        `Engagement Rate: ${((context.raw.r / 20) * maxEngagement * 100).toFixed(2)}%`,
+                                        `Text: ${p.content ? p.content.substring(0, 50) + '...' : ''}`
+                                    ];
+                                }
+                            }
+                        },
+                        zoom: {
+                            pan: {
+                                enabled: true,
+                                mode: 'x',
+                            },
+                            zoom: {
+                                wheel: { enabled: true },
+                                drag: { enabled: true },
+                                pinch: { enabled: true },
+                                mode: 'x',
+                            }
+                        }
+                    },
+scales: {
+                        x: {
+                            type: 'linear',
+                            position: 'bottom',
+                            max: maxTime,
+                            min: minTime,
+                            ticks: {
+                                callback: function(value) {
+                                    if (daysCount <= 3) {
+                                        return new Date(value).toLocaleString();
+                                    }
+                                    return new Date(value).toLocaleDateString();
+                                },
+                                color: '#94a3b8'
+                            },
+                            grid: { color: '#334155' }
+                        },
+                        y: {
+                            type: 'logarithmic',
+                            title: { display: true, text: 'Views (Log Scale)', color: '#94a3b8' },
+                            ticks: { 
+                                color: '#94a3b8',
+                                callback: function(value) {
+                                    if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M';
+                                    if (value >= 1000) return (value / 1000).toFixed(1) + 'K';
+                                    return value;
+                                }
+                            },
+                            grid: { color: '#334155' }
+                        }
+                    }
+                }
+            });
+        }
+    } catch (e) {
+        console.error(e);
+        container.innerHTML = '<p class="text-red-400">Failed to load heatmaps.</p>';
+    }
+}
+
+// ---------- Data Fetchers ----------
+async function fetchJson(path, options = {}) {
+  const currentPort = window.location.port;
+  let baseUrl = window.location.origin;
+
+  if (currentPort === '8000') {
+      baseUrl = baseUrl.replace(':8000', ':3000');
+  } else if (!currentPort && window.location.protocol === 'http:') { // Default HTTP is 80, assume our app is on 3000
+      baseUrl += ':3000';
+  }
+  
+  const url = `${baseUrl}${path}`;
+  const connector = url.includes('?') ? '&' : '?';
+  const finalUrl = `${url}${connector}user_id=${getUserId()}`;
+  
+  try {
+      const res = await fetch(finalUrl, options);
+      if (!res.ok) {
+          const errorText = await res.text();
+          throw new Error(`API error: ${res.status} ${res.statusText} - ${errorText}`);
+      }
+      return await res.json();
+  } catch (e) {
+      console.error('FetchJSON error:', e);
+      alert('Error loading data from API: ' + e.message);
+      throw e; // Re-throw to propagate error
+  }
+}
+
+async function refreshAll() {
+  await loadStats();
+  await loadTabContent(currentTab);
+  document.getElementById('lastUpdate').textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+}
+
+async function loadStats() {
+  const stats = await fetchJson(`${API}/stats`);
+  document.getElementById('statKols').textContent = stats.total_kols;
+  document.getElementById('statPosts').textContent = stats.posts_today;
+  document.getElementById('statInteractions').textContent = stats.interactions_today;
+  document.getElementById('statConnections').textContent = stats.connection_changes_today;
+  document.getElementById('statTotalPosts').textContent = `total: ${stats.total_posts}`;
+}
+
+// ---------- Renderers ----------
+function categoryBadge(cat) {
+  if (!cat) return '';
+  const c = cat.toLowerCase();
+  let cls = 'badge-tech';
+  if (c.includes('vc') || c.includes('venture')) cls = 'badge-vc';
+  else if (c.includes('ai')) cls = 'badge-ai';
+  else if (c.includes('product') || c.includes('growth')) cls = 'badge-product';
+  else if (c.includes('journal') || c.includes('report')) cls = 'badge-journalism';
+  return `<span class="badge ${cls}">${cat}</span>`;
+}
+
+function truncate(text, len=120) {
+  if (!text) return '-';
+  return text.length > len ? text.slice(0, len) + '...' : text;
+}
+
+function timeAgo(dateStr) {
+  if (!dateStr) return '-';
+  const d = new Date(dateStr);
+  const now = new Date();
+  const diff = Math.floor((now - d) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
+async function renderEngagementTracker(el) {
+  const data = await fetchJson(`${API}/twitter_posts?days=90&limit=5000`);
+  
+  // Group by KOL
+  const byKol = {};
+  data.posts.forEach(p => {
+    if (!byKol[p.kol_name]) byKol[p.kol_name] = { name: p.kol_name, posts: [], hot: false };
+    
+    const delta = (p.likes - p.last_likes) + (p.reposts - p.last_reposts)*3 + (p.comments - p.last_comments)*5;
+    p.delta = delta;
+    if (delta > 5) {
+      p.is_hot = true;
+      byKol[p.kol_name].hot = true;
+    }
+    byKol[p.kol_name].posts.push(p);
+  });
+
+  const kolNames = Object.keys(byKol).sort();
+
+  el.innerHTML = `
+    <div class="flex flex-col gap-6">
+      <div class="flex items-center justify-between">
+          <h2 class="text-xl font-bold text-white flex items-center gap-2">
+            <span class="text-xl">⚡</span> Engagement Tracker
+          </h2>
+          <button onclick="switchTab('engagement')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2">
+            <i data-lucide="refresh-cw" class="w-3 h-3"></i> Sync Data
+          </button>
+      </div>
+
+      <div id="engagementList" class="space-y-4">
+        <!-- Rendered by filterEngagementByKol -->
+      </div>
+    </div>
+
+    <!-- User List Modal -->
+    <div id="userListModal" class="fixed inset-0 modal-overlay hidden items-center justify-center z-[100]">
+      <div class="card p-6 w-full max-w-lg mx-4 max-h-[80vh] flex flex-col shadow-2xl border-blue-500/30">
+        <div class="flex items-center justify-between mb-4">
+          <h3 id="userListTitle" class="text-lg font-bold text-white">Interactants</h3>
+          <button onclick="hideUserList()" class="text-slate-400 hover:text-white bg-slate-800 rounded-full w-8 h-8 flex items-center justify-center">✕</button>
+        </div>
+        <div id="userListContent" class="overflow-y-auto scrollbar-thin flex-1 pr-2">
+          <p class="text-slate-500 text-center py-4">Loading list...</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  window.engagementData = byKol; // Store for filtering
+  filterEngagementByKol();
+}
+
+function filterEngagementByKol() {
+  const container = document.getElementById('engagementList');
+  const allData = window.engagementData;
+  const kolNames = Object.keys(allData).sort();
+
+  if (kolNames.length === 0) {
+    container.innerHTML = '<p class="text-slate-500 text-center py-12">No data available yet.</p>';
+    return;
+  }
+
+  container.innerHTML = kolNames.map(name => {
+    const group = allData[name];
+    const posts = group.posts.sort((a,b) => new Date(b.posted_at || b.captured_at) - new Date(a.posted_at || a.captured_at));
+    const totalDelta = posts.reduce((sum, p) => sum + p.delta, 0);
+    const hasHotPosts = group.hot;
+
+    return `
+      <div class="bg-slate-800/40 border border-slate-700 rounded-xl overflow-hidden mb-3 transition-all duration-300">
+        <!-- KOL Header (Accordion Trigger) -->
+        <div onclick="toggleKolAccordion('${name}')" class="flex items-center justify-between p-4 cursor-pointer hover:bg-slate-700/50 transition select-none">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 bg-slate-700 rounded-lg flex items-center justify-center text-blue-400 font-bold border border-slate-600">
+              ${name.charAt(0).toUpperCase()}
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-bold text-white">${name}</span>
+                ${hasHotPosts ? '<span class="text-orange-500 text-xs flex items-center gap-0.5"><span class="animate-pulse">🔥</span> SURGING</span>' : ''}
+              </div>
+              <div class="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">
+                ${posts.length} posts tracked
+              </div>
+            </div>
+          </div>
+          <div class="flex items-center gap-4">
+            <div class="text-right hidden sm:block">
+              <span class="text-xs text-slate-400 block">Recent Activity</span>
+              <span class="${totalDelta > 0 ? 'text-emerald-400' : 'text-slate-500'} font-mono text-sm font-bold">
+                ${totalDelta > 0 ? '+' : ''}${totalDelta} pts
+              </span>
+            </div>
+            <i data-lucide="chevron-down" id="icon-${name.replace(/\W/g, '')}" class="text-slate-500 transition-transform duration-300"></i>
+          </div>
+        </div>
+
+        <!-- KOL Posts (Accordion Content) -->
+        <div id="content-${name.replace(/\W/g, '')}" class="hidden bg-slate-900/50 border-t border-slate-700/50">
+          <div class="p-4 space-y-3">
+            ${posts.map(p => {
+              const d_likes = p.likes - p.last_likes;
+              const d_reposts = p.reposts - p.last_reposts;
+              const d_comments = p.comments - p.last_comments;
+              const isHot = p.delta > 5;
+
+              return `
+                <div class="bg-slate-800/80 rounded-lg p-4 border border-slate-700 relative group transition hover:border-blue-500/50">
+                  <div class="flex justify-between items-start mb-2">
+                    <span class="text-[10px] text-slate-500">${timeAgo(p.posted_at || p.captured_at)}</span>
+                    ${isHot ? '<span class="text-[9px] bg-orange-500/10 text-orange-500 px-1.5 py-0.5 rounded border border-orange-500/20 font-bold uppercase tracking-tighter animate-pulse">Hot Post</span>' : ''}
+                  </div>
+                  
+                  <a href="${p.post_url}" target="_blank" class="block text-sm text-slate-200 mb-4 leading-relaxed hover:text-white transition italic">
+                     "${truncate(p.content, 250)}"
+                  </a>
+
+                  <div class="flex flex-wrap gap-3 items-center">
+                    <div class="flex flex-col bg-slate-900/80 px-3 py-1 rounded-md border border-slate-700 min-w-[70px]">
+                      <span class="text-[9px] text-slate-500 uppercase font-bold">Likes</span>
+                      <div class="flex items-center justify-between">
+                        <span class="text-white font-bold text-xs">${p.likes}</span>
+                        ${d_likes > 0 ? `<span class="text-[10px] text-emerald-400 font-bold">+${d_likes}</span>` : ''}
+                      </div>
+                    </div>
+
+                    <button onclick="viewUserList(${p.id}, 'reposts')" class="flex flex-col bg-slate-900/80 px-3 py-1 rounded-md border border-slate-700 min-w-[85px] hover:border-blue-500 transition text-left">
+                      <span class="text-[9px] text-slate-500 uppercase font-bold">Reposts</span>
+                      <div class="flex items-center justify-between">
+                        <span class="text-white font-bold text-xs">${p.reposts}</span>
+                        ${d_reposts > 0 ? `<span class="text-[10px] text-blue-400 font-bold">+${d_reposts}</span>` : ''}
+                      </div>
+                      <span class="text-[8px] text-blue-500/50 underline mt-0.5">Check users</span>
+                    </button>
+
+                    <button onclick="viewUserList(${p.id}, 'replies')" class="flex flex-col bg-slate-900/80 px-3 py-1 rounded-md border border-slate-700 min-w-[85px] hover:border-blue-500 transition text-left">
+                      <span class="text-[9px] text-slate-500 uppercase font-bold">Replies</span>
+                      <div class="flex items-center justify-between">
+                        <span class="text-white font-bold text-xs">${p.comments}</span>
+                        ${d_comments > 0 ? `<span class="text-[10px] text-amber-400 font-bold">+${d_comments}</span>` : ''}
+                      </div>
+                      <span class="text-[8px] text-amber-500/50 underline mt-0.5">Check users</span>
+                    </button>
+
+                    <a href="${p.post_url}" target="_blank" class="ml-auto p-1.5 bg-slate-800 rounded-lg hover:bg-slate-700 transition">
+                      <i data-lucide="external-link" class="w-4 h-4 text-slate-400"></i>
+                    </a>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  lucide.createIcons();
+}
+
+function toggleKolAccordion(name) {
+  const safeId = name.replace(/\W/g, '');
+  const content = document.getElementById(`content-${safeId}`);
+  const icon = document.getElementById(`icon-${safeId}`);
+  
+  if (content.classList.contains('hidden')) {
+    content.classList.remove('hidden');
+    icon.style.transform = 'rotate(180deg)';
+  } else {
+    content.classList.add('hidden');
+    icon.style.transform = 'rotate(0deg)';
+  }
+}
+
+async function viewUserList(postId, type) {
+    const modal = document.getElementById('userListModal');
+    const content = document.getElementById('userListContent');
+    const title = document.getElementById('userListTitle');
+    
+    title.innerText = type === 'reposts' ? 'Who Reposted?' : 'Who Replied?';
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    content.innerHTML = `
+        <div class="flex flex-col items-center py-12 text-slate-500">
+            <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mb-4"></div>
+            <p>Fetching interactors from database...</p>
+        </div>
+    `;
+    
+    try {
+        const endpoint = type === 'reposts' ? `/api/post_reposts?post_id=${postId}` : `/api/post_replies?post_id=${postId}`;
+        const res = await fetch(endpoint);
+        const data = await res.json();
+        const list = type === 'reposts' ? data.reposts : data.replies;
+        
+        if (!list || list.length === 0) {
+            content.innerHTML = `
+                <div class="text-center py-12">
+                    <p class="text-slate-400 mb-2">No usernames captured for this post yet.</p>
+                    <p class="text-xs text-slate-600">The scraper visits popular posts every 5-15 mins to collect names.</p>
+                </div>
+            `;
+            return;
+        }
+        
+        content.innerHTML = `
+            <div class="grid grid-cols-2 gap-2 pb-4">
+                ${list.map(u => `
+                    <a href="https://x.com/${u.username}" target="_blank" class="bg-slate-900/80 p-2.5 rounded border border-slate-700 hover:border-blue-500 hover:bg-slate-800 transition flex items-center justify-between group">
+                        <span class="text-blue-400 text-sm font-medium group-hover:text-blue-300">@${u.username}</span>
+                        <span class="text-[9px] text-slate-600">${new Date(u.captured_at).toLocaleDateString()}</span>
+                    </a>
+                `).join('')}
+            </div>
+            <div class="mt-4 p-3 bg-blue-900/20 rounded-lg border border-blue-900/40">
+                <p class="text-[10px] text-blue-300 text-center uppercase tracking-wider font-semibold">Total captured: ${list.length}</p>
+            </div>
+        `;
+    } catch (e) {
+        content.innerHTML = '<p class="text-red-400 text-center py-12 font-medium">Error connecting to API server.</p>';
+    }
+}
+
+function hideUserList() {
+    const modal = document.getElementById('userListModal');
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+}
+
+async function renderOverview(el) {
+  const data = await fetchJson(`${API}/kols`);
+  kolsData = data.kols;
+  
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-white">KOL Overview (${data.kols.length})</h2>
+      <input type="text" id="searchKol" oninput="filterKols()" placeholder="Search KOLs..." 
+        class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none w-64">
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-slate-400 text-xs uppercase border-b border-slate-700">
+            <th class="pb-3 pr-4">Name</th>
+            <th class="pb-3 pr-4">Organization</th>
+            <th class="pb-3 pr-4">Category</th>
+            <th class="pb-3 pr-4 text-center">Posts</th>
+            <th class="pb-3 pr-4 text-center">Interactions</th>
+            <th class="pb-3 pr-4 text-center">Followers</th>
+            <th class="pb-3 pr-4 text-center">Connections</th>
+            <th class="pb-3">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="kolTableBody">
+          ${data.kols.map(k => `
+            <tr class="table-row border-b border-slate-700/50 transition">
+              <td class="py-3 pr-4">
+                <a href="${k.linkedin_url || '#'}" target="_blank" class="text-blue-400 hover:text-blue-300 font-medium">${k.name}</a>
+              </td>
+              <td class="py-3 pr-4 text-slate-400">${k.org || '-'}</td>
+              <td class="py-3 pr-4">${categoryBadge(k.category)}</td>
+              <td class="py-3 pr-4 text-center">${k.post_count || 0}</td>
+              <td class="py-3 pr-4 text-center">${k.interaction_count || 0}</td>
+              <td class="py-3 pr-4 text-center">${k.latest_followers != null ? k.latest_followers.toLocaleString() : '-'}</td>
+              <td class="py-3 pr-4 text-center">${k.latest_connections != null ? k.latest_connections.toLocaleString() : '-'}</td>
+              <td class="py-3">
+                <button onclick="deleteKol(${k.id})" class="text-red-400 hover:text-red-300 text-xs">Remove</button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function renderPosts(el) {
+  const data = await fetchJson(`${API}/posts?days=7&limit=50`);
+  el.innerHTML = `
+    <h2 class="text-lg font-semibold text-white mb-4">Recent Posts (${data.posts.length})</h2>
+    <div class="space-y-3">
+      ${data.posts.length === 0 ? '<p class="text-slate-500 text-center py-8">No posts captured yet. Run the scraper first.</p>' :
+      data.posts.map(p => `
+        <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50">
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-medium text-blue-400">${p.kol_name}</span>
+            <span class="text-xs text-slate-500">${timeAgo(p.captured_at)}</span>
+          </div>
+          <p class="text-sm text-slate-300 mb-2">${truncate(p.content, 300)}</p>
+          <div class="flex gap-4 text-xs text-slate-500">
+            <span>👍 ${p.likes || 0}</span>
+            <span>💬 ${p.comments || 0}</span>
+            <span>🔄 ${p.reposts || 0}</span>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function renderInteractions(el) {
+  const data = await fetchJson(`${API}/interactions?days=7&limit=50`);
+  el.innerHTML = `
+    <h2 class="text-lg font-semibold text-white mb-4">Recent Interactions (${data.interactions.length})</h2>
+    <div class="space-y-3">
+      ${data.interactions.length === 0 ? '<p class="text-slate-500 text-center py-8">No interactions captured yet.</p>' :
+      data.interactions.map(i => `
+        <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="font-medium text-blue-400">${i.kol_name}</span>
+            <span class="text-slate-500">→</span>
+            <span class="text-emerald-400">${i.target_name || 'unknown'}</span>
+            <span class="badge badge-tech">${i.interaction_type || 'interaction'}</span>
+          </div>
+          <p class="text-sm text-slate-300">${truncate(i.content, 200)}</p>
+          <span class="text-xs text-slate-500">${timeAgo(i.captured_at)}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function renderConnections(el) {
+  const data = await fetchJson(`${API}/connections?days=7&limit=100`);
+  el.innerHTML = `
+    <h2 class="text-lg font-semibold text-white mb-4">Connection Changes (${data.connections.length})</h2>
+    <div class="space-y-2">
+      ${data.connections.length === 0 ? '<p class="text-slate-500 text-center py-8">No connection changes detected yet.</p>' :
+      data.connections.map(c => `
+        <div class="flex items-center gap-3 bg-slate-800/50 rounded-lg p-3 border border-slate-700/50">
+          <span class="${c.change_type === 'new' ? 'text-emerald-400' : 'text-red-400'} text-lg">${c.change_type === 'new' ? '➕' : '➖'}</span>
+          <div class="flex-1">
+            <span class="text-blue-400">${c.kol_name || 'KOL'}</span>
+            <span class="text-slate-500 text-sm"> ${c.direction === 'following' ? 'started following' : 'gained follower'} </span>
+            <span class="text-white">${c.connection_name || 'someone'}</span>
+          </div>
+          <span class="text-xs text-slate-500">${timeAgo(c.detected_at)}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function renderMetrics(el) {
+  const data = await fetchJson(`${API}/metrics?days=30`);
+  
+  // Group by KOL
+  const byKol = {};
+  data.metrics.forEach(m => {
+    if (!byKol[m.kol_name]) byKol[m.kol_name] = [];
+    byKol[m.kol_name].push(m);
+  });
+  
+  el.innerHTML = `
+    <h2 class="text-lg font-semibold text-white mb-4">KOL Metrics History</h2>
+    <div class="space-y-4">
+      ${Object.keys(byKol).length === 0 ? '<p class="text-slate-500 text-center py-8">No metrics captured yet. Run the scraper first.</p>' :
+      Object.entries(byKol).map(([name, metrics]) => {
+        const latest = metrics[0];
+        return `
+          <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50">
+            <h3 class="font-medium text-blue-400 mb-2">${name}</h3>
+            <div class="grid grid-cols-3 gap-4 text-sm">
+              <div>
+                <div class="text-slate-400 text-xs">Followers</div>
+                <div class="text-white font-medium">${latest.followers_count != null ? latest.followers_count.toLocaleString() : '-'}</div>
+              </div>
+              <div>
+                <div class="text-slate-400 text-xs">Connections</div>
+                <div class="text-white font-medium">${latest.connections_count != null ? latest.connections_count.toLocaleString() : '-'}</div>
+              </div>
+              <div>
+                <div class="text-slate-400 text-xs">Last Updated</div>
+                <div class="text-white font-medium">${timeAgo(latest.captured_at)}</div>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+async function renderSettings(el) {
+  const profile = await fetchJson(`${API}/auth/profile`);
+  const kolsResponse = await fetchJson(`${API}/kols`);
+  const kols = kolsResponse.kols || kolsResponse || [];
+  
+  el.innerHTML = `
+    <h2 class="text-xl font-bold text-white mb-6">⚙️ SaaS System Settings</h2>
+    
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="space-y-6">
+        <!-- Twitter Credentials -->
+        <div class="card p-5 border-l-4 border-l-blue-500">
+          <h3 class="font-bold text-white mb-4 flex items-center gap-2">
+            <i data-lucide="key" class="w-4 h-4 text-blue-400"></i>
+            My Twitter / X Credentials
+          </h3>
+          <div class="mb-4">
+             ${profile.has_cookies ? 
+               '<span class="bg-emerald-500/10 text-emerald-500 text-[10px] px-2 py-1 rounded border border-emerald-500/20 font-bold uppercase tracking-wider">Status: Connected</span>' : 
+               '<span class="bg-amber-500/10 text-amber-500 text-[10px] px-2 py-1 rounded border border-amber-500/20 font-bold uppercase tracking-wider">Status: Disconnected</span>'}
+          </div>
+          <p class="text-xs text-slate-400 mb-4">Refresh your X account in a browser and copy tokens from Cookies.</p>
+          
+          <div class="space-y-4">
+            <div>
+              <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">auth_token</label>
+              <input id="token_auth" type="password" placeholder="Enter auth_token" 
+                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none">
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">ct0 (CSRF Token)</label>
+              <input id="token_ct0" type="password" placeholder="Enter ct0" 
+                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none">
+            </div>
+            <button onclick="saveCookies()" class="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-2 text-sm font-bold transition">
+              Update X Credentials
+            </button>
+          </div>
+        </div>
+
+        <!-- Discord Webhooks -->
+        <div class="card p-5 border-l-4 border-l-purple-500">
+          <h3 class="font-bold text-white mb-4 flex items-center gap-2">
+            <i data-lucide="bell" class="w-4 h-4 text-purple-400"></i>
+            My Discord Notifications
+          </h3>
+          <p class="text-xs text-slate-400 mb-4">Paste your Discord channel webhooks below to receive alerts.</p>
+          
+          <div class="space-y-4">
+            <div>
+              <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">New Posts Webhook</label>
+              <input id="hook_posts" type="text" value="${profile.discord_webhook_posts || ''}" 
+                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Interactions Webhook</label>
+              <input id="hook_interactions" type="text" value="${profile.discord_webhook_interactions || ''}" 
+                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Following Webhook</label>
+              <input id="hook_following" type="text" value="${profile.discord_webhook_following || ''}" 
+                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Followers Webhook</label>
+              <input id="hook_followers" type="text" value="${profile.discord_webhook_followers || ''}" 
+                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+            </div>
+            <button onclick="saveWebhooks()" class="w-full bg-purple-600 hover:bg-purple-700 text-white rounded-lg py-2 text-sm font-bold transition">
+              Save Webhook Settings
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="space-y-6">
+        <!-- Tracked KOLs List -->
+        <div class="card p-5 border-l-4 border-l-amber-500">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="font-bold text-white flex items-center gap-2">
+              <i data-lucide="users" class="w-4 h-4 text-amber-400"></i>
+              Manage My KOLs
+            </h3>
+            <div class="flex items-center gap-2">
+                <button onclick="removeAllKols()" class="text-[9px] bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white px-2 py-0.5 rounded border border-red-500/20 font-bold uppercase transition">Remove All</button>
+                <span class="text-[10px] bg-slate-700 text-slate-300 px-2 py-0.5 rounded-full font-bold uppercase">${kols.length} Total</span>
+            </div>
+          </div>
+          <div class="max-h-[350px] overflow-y-auto scrollbar-thin pr-2 mb-4 space-y-2">
+            ${kols.length === 0 ? '<p class="text-slate-500 text-center py-8 text-sm italic">No KOLs added yet.</p>' : kols.map(k => `
+              <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg border border-slate-700/50 hover:border-slate-600 transition">
+                <div>
+                  <div class="text-sm font-bold text-white">${k.name}</div>
+                  <div class="text-[10px] text-slate-500 font-mono truncate max-w-[200px]">${k.twitter_url || k.linkedin_url || 'No URL'}</div>
+                </div>
+                <button onclick="deleteKol(${k.id})" class="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-md transition">
+                  <i data-lucide="trash-2" class="w-4 h-4"></i>
+                </button>
+              </div>
+            `).join('')}
+          </div>
+          <button onclick="showAddKol()" class="w-full py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 border border-slate-700">
+            <i data-lucide="plus" class="w-3 h-3"></i> Add New KOL
+          </button>
+        </div>
+
+        <!-- Bulk Import -->
+        <div class="card p-5 border-l-4 border-l-emerald-500">
+          <h3 class="font-bold text-white mb-2 flex items-center gap-2">
+            <i data-lucide="upload-cloud" class="w-4 h-4 text-emerald-400"></i>
+            Bulk Import X Profiles
+          </h3>
+          
+          <div class="mb-4">
+            <p class="text-xs text-slate-400 mb-2">Paste a list of Twitter/X Profile URLs (one per line). The system will automatically extract names.</p>
+            <div class="bg-slate-900/50 p-3 rounded-lg border border-slate-700 text-[10px] text-emerald-500 font-mono">
+                Example:<br>
+                https://x.com/elonmusk<br>
+                https://x.com/vitalikbuterin
+            </div>
+          </div>
+
+          <textarea id="bulkImport" rows="5" placeholder="https://x.com/username1&#10;https://x.com/username2" 
+            class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-emerald-500 focus:outline-none mb-3 font-mono"></textarea>
+          <button onclick="bulkImportKols()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg py-2 text-sm font-bold transition">
+            Import X URLs
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  lucide.createIcons();
+}
+
+async function saveCookies() {
+  const auth = document.getElementById('token_auth').value.trim();
+  const ct0 = document.getElementById('token_ct0').value.trim();
+  
+  if (!auth || !ct0) { alert("Please enter both tokens."); return; }
+  
+  try {
+    const res = await fetchJson('/api/config/cookies', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ auth_token: auth, ct0: ct0, user_id: getUserId() })
+    });
+    alert("Success: " + res.message);
+    document.getElementById('token_auth').value = '';
+    document.getElementById('token_ct0').value = '';
+    renderSettings(document.getElementById('content'));
+  } catch (e) { alert("Error updating cookies."); }
+}
+
+async function saveWebhooks() {
+  const data = {
+    discord_webhook_posts: document.getElementById('hook_posts').value.trim(),
+    discord_webhook_interactions: document.getElementById('hook_interactions').value.trim(),
+    discord_webhook_heatmap: document.getElementById('hook_heatmap').value.trim(),
+    discord_webhook_following: document.getElementById('hook_following').value.trim(),
+    discord_webhook_followers: document.getElementById('hook_followers').value.trim()
+  };
+  
+  try {
+    const res = await fetchJson(`/api/auth/profile?user_id=${getUserId()}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data)
+    });
+    alert("Success: Webhooks saved.");
+  } catch (e) { alert("Error saving webhooks."); }
+}
+
+// ---------- Actions ----------
+function showAddKol() { document.getElementById('addKolModal').classList.remove('hidden'); document.getElementById('addKolModal').classList.add('flex'); }
+function hideAddKol() { document.getElementById('addKolModal').classList.add('hidden'); document.getElementById('addKolModal').classList.remove('flex'); }
+
+async function submitAddKol(e) {
+  e.preventDefault();
+  const body = {
+    name: document.getElementById('addName').value,
+    org: document.getElementById('addOrg').value || null,
+    category: document.getElementById('addCategory').value || null,
+    linkedin_url: document.getElementById('addLinkedin').value || null,
+    twitter_url: document.getElementById('addTwitter').value || null,
+    notes: document.getElementById('addNotes').value || null,
+    user_id: getUserId()
+  };
+  let targetUrl = `${API}/kols`;
+  if (window.location.origin.includes(':8000')) {
+      targetUrl = window.location.origin.replace(':8000', ':3000') + '/api/kols';
+  }
+  await fetch(targetUrl, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  hideAddKol();
+  refreshAll();
+}
+
+async function deleteKol(id) {
+  if (!confirm('Remove this KOL from monitoring?')) return;
+  let targetUrl = `${API}/kols/${id}`;
+  if (window.location.origin.includes(':8000')) {
+      targetUrl = window.location.origin.replace(':8000', ':3000') + `/api/kols/${id}`;
+  }
+  await fetch(targetUrl, { method: 'DELETE' });
+  renderSettings(document.getElementById('content'));
+}
+
+async function removeAllKols() {
+  if (!confirm('DANGER: This will delete ALL your tracked KOLs and their historical data. Are you sure?')) return;
+  
+  let targetUrl = `${API}/kols/all?user_id=${getUserId()}`;
+  if (window.location.origin.includes(':8000')) {
+      targetUrl = window.location.origin.replace(':8000', ':3000') + `/api/kols/all?user_id=${getUserId()}`;
+  }
+
+  try {
+    const res = await fetch(targetUrl, { method: 'DELETE' });
+    if (res.ok) {
+        alert("All KOLs have been removed.");
+        renderSettings(document.getElementById('content'));
+    }
+  } catch (e) { alert("Error removing all KOLs."); }
+}
+
+async function bulkImportKols() {
+  const text = document.getElementById('bulkImport').value.trim();
+  if (!text) return;
+  
+  const lines = text.split('\n');
+  let imported = 0;
+  
+  let targetUrl = `${API}/kols`;
+  if (window.location.origin.includes(':8000')) {
+      targetUrl = window.location.origin.replace(':8000', ':3000') + '/api/kols';
+  }
+
+  for (const line of lines) {
+    const url = line.trim();
+    if (!url) continue;
+    
+    // Extract username from URL for initial name
+    let name = url.split('/').pop() || 'X KOL';
+    if (name.includes('?')) name = name.split('?')[0];
+
+    const body = { 
+        user_id: getUserId(),
+        name: name,
+        twitter_url: url,
+        category: 'X KOL'
+    };
+
+    await fetch(targetUrl, { 
+        method: 'POST', 
+        headers: {'Content-Type':'application/json'}, 
+        body: JSON.stringify(body) 
+    });
+    imported++;
+  }
+  
+  alert(`Successfully imported ${imported} X profiles. Scraper will fetch full details on next run.`);
+  document.getElementById('bulkImport').value = '';
+  renderSettings(document.getElementById('content'));
+}
+
+function filterKols() {
+  const q = document.getElementById('searchKol').value.toLowerCase();
+  const rows = document.querySelectorAll('#kolTableBody tr');
+  rows.forEach(row => {
+    row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+
+// ---------- Init ----------
+(async () => {
+  await loadStats();
+  await loadTabContent('overview');
+  document.getElementById('lastUpdate').textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+  
+  // Auto-refresh every 5 minutes
+  setInterval(refreshAll, 5 * 60 * 1000);
+})();
+</script>
+
+</body>
+</html>
