@@ -10,51 +10,49 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import SCRAPE_INTERVAL
 
 def run_twitter_scraper():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Running Twitter scraper (5m interval)...")
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Running Twitter scraper...")
     try:
-        subprocess.run([sys.executable, "/data/.openclaw/workspace/kol-monitor/twitter_scraper.py"], timeout=600)
+        subprocess.run([sys.executable, "/app/twitter_scraper.py"], timeout=600)
     except Exception as e:
         print(f"❌ Twitter scraper error: {e}")
 
-def run_discord_push_posts():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Pushing NEW POSTS to Discord...")
+def run_dm_scheduler():
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Running DM Scheduler...")
     try:
-        subprocess.run([sys.executable, "/data/.openclaw/workspace/kol-monitor/discord_push.py", "posts", "5"], timeout=60)
+        subprocess.run([sys.executable, "/app/dm_scheduler.py"], timeout=600)
     except Exception as e:
-        print(f"❌ Discord push error: {e}")
+        print(f"❌ DM Scheduler error: {e}")
 
-def run_discord_push_metrics():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Pushing FOLLOWERS/FOLLOWING to Discord...")
+def run_discord_push(job_type):
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Pushing {job_type.upper()} to Discord...")
     try:
-        subprocess.run([sys.executable, "/data/.openclaw/workspace/kol-monitor/discord_push.py", "metrics", "5"], timeout=60)
+        subprocess.run([sys.executable, "/app/discord_push.py", job_type], timeout=120)
     except Exception as e:
-        print(f"❌ Discord push error: {e}")
-
-
-def run_discord_push_heatmap():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Pushing TRENDING SURGE to Discord...")
-    try:
-        subprocess.run([sys.executable, "/data/.openclaw/workspace/kol-monitor/discord_push.py", "heatmap", "5"], timeout=60)
-    except Exception as e:
-        print(f"❌ Discord push error: {e}")
+        print(f"❌ Discord push error ({job_type}): {e}")
 
 async def main():
-
     scheduler = AsyncIOScheduler()
-    
-    # Scrapers (Dynamic interval from config)
+
+    # Scraper runs every SCRAPE_INTERVAL minutes
     scheduler.add_job(run_twitter_scraper, 'interval', minutes=SCRAPE_INTERVAL, id='twitter_scraper')
-    
-    # Push Tasks
-    scheduler.add_job(run_discord_push_posts, 'interval', minutes=SCRAPE_INTERVAL, seconds=30, id='discord_push_posts')
-    scheduler.add_job(run_discord_push_metrics, 'interval', minutes=SCRAPE_INTERVAL, id='discord_push_metrics')
-    scheduler.add_job(run_discord_push_heatmap, 'interval', minutes=SCRAPE_INTERVAL, seconds=60, id='discord_push_heatmap')
-    
+
+    # Discord push jobs — all run every SCRAPE_INTERVAL minutes, staggered by seconds
+    scheduler.add_job(lambda: run_discord_push("posts"),        'interval', minutes=SCRAPE_INTERVAL, seconds=30, id='push_posts')
+    scheduler.add_job(lambda: run_discord_push("following"),    'interval', minutes=SCRAPE_INTERVAL, seconds=40, id='push_following')
+    scheduler.add_job(lambda: run_discord_push("followers"),    'interval', minutes=SCRAPE_INTERVAL, seconds=50, id='push_followers')
+    scheduler.add_job(lambda: run_discord_push("heatmap"),      'interval', minutes=SCRAPE_INTERVAL, seconds=60, id='push_heatmap')
+    scheduler.add_job(lambda: run_discord_push("interactions"), 'interval', minutes=SCRAPE_INTERVAL, seconds=70, id='push_interactions')
+
+    # DM Scheduler runs every 5 minutes specifically
+    scheduler.add_job(run_dm_scheduler, 'interval', minutes=5, id='dm_scheduler_job')
+
     scheduler.start()
-    print("📅 KOL Monitor Scheduler Started (Balanced 15m Mode)!")
-    print("   - All tasks run every 15 minutes")
-    print("   - Trending reports pushed to interactions channel")
-    
+    print(f"📅 KOL Monitor Scheduler Started ({SCRAPE_INTERVAL}m Mode)!")
+    print(f"   - Scraper runs every {SCRAPE_INTERVAL} minutes")
+    print(f"   - 5 Discord channels updated every {SCRAPE_INTERVAL} minutes")
+    print(f"   - Channels: posts, following, followers, heatmap, interactions")
+    print(f"   - DM Scheduler runs every 5 minutes")
+
     try:
         while True: await asyncio.sleep(3600)
     except (KeyboardInterrupt, SystemExit):

@@ -9,7 +9,8 @@ def load_env():
             for line in f:
                 if line.strip() and not line.startswith("#"):
                     key, value = line.strip().split("=", 1)
-                    os.environ[key] = value
+                    if key not in os.environ:
+                        os.environ[key] = value
 
 load_env()
 
@@ -32,7 +33,7 @@ TWITTER_AUTH_TOKEN = os.getenv("TWITTER_AUTH_TOKEN")
 TWITTER_CT0 = os.getenv("TWITTER_CT0")
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 SCRAPE_INTERVAL = int(os.getenv("SCRAPE_INTERVAL_MINS", "15"))
-SLOW_MO = 3000
+SLOW_MO = 1000
 
 # API
 API_PORT = int(os.getenv("API_PORT", "3000"))

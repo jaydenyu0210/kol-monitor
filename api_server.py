@@ -49,6 +49,9 @@ class KolCreate(BaseModel):
     twitter_url: Optional[str] = None
     notes: Optional[str] = None
     user_id: int = 1 # Default for transition
+    dm_text: Optional[str] = None
+    dm_day: Optional[str] = None
+    dm_time: Optional[str] = None
 
 class KolUpdate(BaseModel):
     name: Optional[str] = None
@@ -58,20 +61,24 @@ class KolUpdate(BaseModel):
     twitter_url: Optional[str] = None
     notes: Optional[str] = None
     status: Optional[str] = None
+    dm_text: Optional[str] = None
+    dm_day: Optional[str] = None
+    dm_time: Optional[str] = None
 
 # ---------- Dashboard HTML ----------
 
 @app.get("/test", response_class=HTMLResponse)
 async def dashboard_test():
     html_path = os.path.join(os.path.dirname(__file__), "dashboard_test.html")
-    with open(html_path, "r") as f:
+    with open(html_path, "r", encoding="utf-8") as f:
         return f.read()
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
-    with open(html_path, "r") as f:
+    with open(html_path, "r", encoding="utf-8") as f:
         return f.read()
+
 
 # ---------- User/Auth Endpoints ----------
 
@@ -128,9 +135,9 @@ def create_kol(kol: KolCreate):
     db = get_db()
     cur = db.cursor()
     cur.execute("""
-        INSERT INTO kols (name, org, category, linkedin_url, twitter_url, notes, user_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
-    """, (kol.name, kol.org, kol.category, kol.linkedin_url, kol.twitter_url, kol.notes, kol.user_id))
+        INSERT INTO kols (name, org, category, linkedin_url, twitter_url, notes, user_id, dm_text, dm_day, dm_time)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+    """, (kol.name, kol.org, kol.category, kol.linkedin_url, kol.twitter_url, kol.notes, kol.user_id, kol.dm_text, kol.dm_day, kol.dm_time))
     kol_id = cur.fetchone()[0]
     db.commit()
     db.close()
@@ -416,7 +423,7 @@ def get_profile(user_id: int):
     db.close()
     if row:
         # Check if cookies exist for this user
-        creds_path = f"/data/.openclaw/workspace/kol-monitor/credentials/twitter_{user_id}.json"
+        creds_path = f"/app/credentials/twitter_{user_id}.json"
         row['has_cookies'] = os.path.exists(creds_path)
         return row
     raise HTTPException(404, "User not found")
@@ -424,7 +431,7 @@ def get_profile(user_id: int):
 @app.post("/api/config/cookies")
 def update_cookies(data: CookieUpdate):
     # In Multi-tenant mode, we store user-specific cookies in a credentials folder
-    creds_dir = "/data/.openclaw/workspace/kol-monitor/credentials"
+    creds_dir = "/app/credentials"
     os.makedirs(creds_dir, exist_ok=True)
     
     creds_path = os.path.join(creds_dir, f"twitter_{data.user_id}.json")
@@ -433,9 +440,7 @@ def update_cookies(data: CookieUpdate):
     
     return {"status": "success", "message": f"Cookies updated for User {data.user_id}."}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3000)
+
 
 @app.get("/api/post_replies")
 def get_post_replies(post_id: int):
@@ -464,3 +469,23 @@ def get_post_reposts(post_id: int):
 @app.get("/api/projects")
 async def get_projects_compatibility():
     return [{"id": "kol-monitor", "name": "KOL Monitor Product", "status": "running"}]
+
+@app.get("/api/dm_logs")
+def get_dm_logs(user_id: int):
+    db = get_db()
+    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT l.*, k.name as kol_name 
+        FROM dm_logs l
+        JOIN kols k ON l.kol_id = k.id
+        WHERE k.user_id = %s
+        ORDER BY l.sent_at DESC
+        LIMIT 50
+    """, (user_id,))
+    res = cur.fetchall()
+    db.close()
+    return {"logs": res}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=API_PORT)

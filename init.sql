@@ -120,7 +120,10 @@ CREATE TABLE public.kols (
     notes text,
     status text DEFAULT 'active'::text,
     created_at timestamp without time zone DEFAULT now(),
-    updated_at timestamp without time zone DEFAULT now()
+    updated_at timestamp without time zone DEFAULT now(),
+    dm_text text,
+    dm_day text,
+    dm_time text
 );
 
 
@@ -611,6 +614,29 @@ ALTER TABLE ONLY public.twitter_post_reposts
 --
 -- PostgreSQL database dump complete
 --
+
+-- Users table (required by the application)
+CREATE TABLE IF NOT EXISTS public.users (
+    id SERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    email TEXT UNIQUE,
+    discord_webhook_posts TEXT,
+    discord_webhook_interactions TEXT,
+    discord_webhook_metrics TEXT,
+    discord_webhook_heatmap TEXT,
+    discord_webhook_following TEXT,
+    discord_webhook_followers TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+ALTER TABLE public.users OWNER TO node;
+
+-- Add user_id column to kols if not exists
+ALTER TABLE public.kols ADD COLUMN IF NOT EXISTS user_id INTEGER DEFAULT 1;
+
+-- Default admin user
+INSERT INTO public.users (id, username, password_hash, email) VALUES (1, 'admin', 'admin', 'admin@local') ON CONFLICT DO NOTHING;
 
 \unrestrict 5gquQUPXNm5HeclWNdWb23KhR32KBZCakWOn7bLRZa1dwLbeGTVBel4awbAHfyU
 

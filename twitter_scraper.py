@@ -44,7 +44,7 @@ async def scrape_post_interactions(page, db, twitter_post_id, tweet_url, interac
     try:
         # Navigate to the status page
         await page.goto(tweet_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(1500)
         
         # If we want reposters, we need to click the reposts count
         if interaction_type == "reposts":
@@ -53,7 +53,7 @@ async def scrape_post_interactions(page, db, twitter_post_id, tweet_url, interac
                  repost_link = await page.query_selector('a[href$="/retweets"]')
                  if repost_link:
                      await repost_link.click()
-                     await page.wait_for_timeout(3000)
+                     await page.wait_for_timeout(1500)
              except: pass
 
         usernames = set()
@@ -79,7 +79,7 @@ async def scrape_post_interactions(page, db, twitter_post_id, tweet_url, interac
             await page.evaluate(f"window.scrollBy(0, {scroll_amt})")
             
             # Random wait (human "reading" time)
-            await page.wait_for_timeout(random.randint(2000, 4000))
+            await page.wait_for_timeout(random.randint(800, 1500))
 
         # Save to DB
         cur = db.cursor()
@@ -120,7 +120,7 @@ async def scrape_profile(page, kol_id, name, url, db):
         # Keep scrolling a bit to load the tweets (sometimes they are lazy loaded or we need to skip pinned tweets)
         for _ in range(3):
             await page.evaluate("window.scrollBy(0, 1000)")
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
         
         # --- Scrape Profile Metrics ---
         metrics = {}
@@ -222,9 +222,9 @@ async def scrape_profile(page, kol_id, name, url, db):
         
         # Now scrape detailed interactions if they are high
         for pt in processed_tweets:
-            if pt['replies'] > 5:
+            if pt['replies'] > 15:
                 await scrape_post_interactions(page, db, pt['db_id'], pt['url'], "replies")
-            if pt['reposts'] > 5:
+            if pt['reposts'] > 15:
                 await scrape_post_interactions(page, db, pt['db_id'], pt['url'], "reposts")
         
         return True
@@ -249,7 +249,7 @@ async def main():
             print(f"--- Starting Scrape for User ID: {user_id} ---")
             
             # Load user-specific cookies
-            creds_path = f"/data/.openclaw/workspace/kol-monitor/credentials/twitter_{user_id}.json"
+            creds_path = f"/app/credentials/twitter_{user_id}.json"
             if os.path.exists(creds_path):
                 with open(creds_path) as f:
                     creds = json.load(f)
