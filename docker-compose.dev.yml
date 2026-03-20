@@ -1,0 +1,16 @@
+# Docker Compose for LOCAL DEVELOPMENT
+# Connects to remote Supabase (no local database)
+
+services:
+  app:
+    build: ./backend
+    container_name: kol-monitor-dev
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - HEADLESS=true

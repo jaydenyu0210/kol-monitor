@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KOL Monitor Pro — Sign In</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0f172a;
+        }
+
+        .glass {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(51, 65, 85, 0.5);
+        }
+    </style>
+</head>
+
+<body class="min-h-screen flex items-center justify-center p-4">
+
+    <div class="glass rounded-2xl p-8 w-full max-w-md shadow-2xl">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <div
+                class="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-blue-500/20">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-10 h-10 text-white" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2">
+                    <path d="m12 22-1-1H4V3h16v18h-7Z" />
+                    <path d="m9 12 2 2 4-4" />
+                </svg>
+            </div>
+            <h1 class="text-2xl font-black text-white tracking-tight">KOL MONITOR <span class="text-blue-500">PRO</span>
+            </h1>
+            <p class="text-slate-500 text-sm mt-1" id="subtitle">Sign in to your dashboard</p>
+        </div>
+
+        <!-- Login Form -->
+        <div id="loginForm" class="space-y-4">
+            <div>
+                <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Email</label>
+                <input id="email" type="email" required
+                    class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white focus:border-blue-500 focus:outline-none transition"
+                    placeholder="you@example.com">
+            </div>
+            <div>
+                <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Password</label>
+                <input id="password" type="password" required
+                    class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white focus:border-blue-500 focus:outline-none transition"
+                    placeholder="••••••••">
+            </div>
+            <div id="errorMsg" class="text-rose-400 text-xs hidden"></div>
+            <button onclick="handleLogin()" id="submitBtn"
+                class="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-3 font-bold transition flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20">
+                Sign In
+            </button>
+            <p class="text-center text-xs text-slate-600 mt-4">
+                Don't have an account? <a href="#" onclick="toggleMode()" class="text-blue-500 hover:underline"
+                    id="toggleLink">Create one</a>
+            </p>
+        </div>
+    </div>
+
+    <script type="module">
+        import { supabase } from './js/supabaseClient.js';
+
+        let isSignUp = false;
+
+        // Check if already logged in
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session) window.location.href = '/';
+
+        window.toggleMode = () => {
+            isSignUp = !isSignUp;
+            document.getElementById('subtitle').textContent = isSignUp ? 'Create your account' : 'Sign in to your dashboard';
+            document.getElementById('submitBtn').textContent = isSignUp ? 'Create Account' : 'Sign In';
+            document.getElementById('toggleLink').textContent = isSignUp ? 'Sign in instead' : 'Create one';
+        };
+
+        window.handleLogin = async () => {
+            const email = document.getElementById('email').value.trim();
+            const password = document.getElementById('password').value;
+            const errorDiv = document.getElementById('errorMsg');
+            const btn = document.getElementById('submitBtn');
+
+            if (!email || !password) { showError('Please fill in all fields.'); return; }
+
+            btn.disabled = true;
+            btn.textContent = isSignUp ? 'Creating...' : 'Signing in...';
+            errorDiv.classList.add('hidden');
+
+            try {
+                let result;
+                if (isSignUp) {
+                    result = await supabase.auth.signUp({ email, password });
+                } else {
+                    result = await supabase.auth.signInWithPassword({ email, password });
+                }
+
+                if (result.error) throw result.error;
+
+                if (isSignUp && !result.data.session) {
+                    showError('Check your email for a confirmation link!', false);
+                    return;
+                }
+
+                window.location.href = '/';
+            } catch (err) {
+                showError(err.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = isSignUp ? 'Create Account' : 'Sign In';
+            }
+        };
+
+        function showError(msg, isError = true) {
+            const el = document.getElementById('errorMsg');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+            el.className = `text-xs ${isError ? 'text-rose-400' : 'text-emerald-400'}`;
+        }
+    </script>
+</body>
+
+</html>
