@@ -11,6 +11,7 @@ import psycopg2
 import psycopg2.extras
 
 from db import get_db, release_db
+from config import SCRAPE_INTERVAL
 
 
 def get_all_user_webhooks():
@@ -55,18 +56,25 @@ async def send_embeds(webhook_url: str, embeds: list):
 # CHANNEL 1: New Posts
 # ============================================================
 
-def build_post_embeds(user_id: str, interval_mins: int = 30):
+def build_post_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
     """Build embeds for new posts from the last N minutes."""
     db = get_db()
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Only push posts that were BOTH captured recently AND posted recently
+        # This prevents old posts from a first-time scrape being pushed.
         since = datetime.utcnow() - timedelta(minutes=interval_mins)
+        # We give a small buffer for posted_at (2x interval) to account for scraper delay
+        posted_since = datetime.utcnow() - timedelta(minutes=interval_mins * 2)
+        
         cur.execute("""
             SELECT tp.*, k.name as kol_name FROM twitter_posts tp
             JOIN kols k ON tp.kol_id = k.id
-            WHERE k.user_id = %s AND tp.captured_at > %s
+            WHERE k.user_id = %s 
+              AND tp.captured_at > %s
+              AND tp.posted_at > %s
             ORDER BY tp.captured_at DESC
-        """, (user_id, since))
+        """, (user_id, since, posted_since))
         posts = cur.fetchall()
 
         embeds = []
@@ -93,7 +101,7 @@ def build_post_embeds(user_id: str, interval_mins: int = 30):
 # CHANNEL 2: Following Changes
 # ============================================================
 
-def build_following_embeds(user_id: str, interval_mins: int = 30):
+def build_following_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
     """Build embeds for following count changes."""
     db = get_db()
     try:
@@ -132,7 +140,7 @@ def build_following_embeds(user_id: str, interval_mins: int = 30):
 # CHANNEL 3: Follower Changes
 # ============================================================
 
-def build_follower_embeds(user_id: str, interval_mins: int = 30):
+def build_follower_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
     """Build embeds for follower count changes."""
     db = get_db()
     try:
@@ -214,7 +222,7 @@ def build_heatmap_embeds(user_id: str):
 # CHANNEL 5: Interaction Changes (engagement delta)
 # ============================================================
 
-def build_interaction_embeds(user_id: str, interval_mins: int = 30):
+def build_interaction_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
     """Build embeds for engagement changes on existing posts."""
     db = get_db()
     try:
@@ -265,18 +273,22 @@ CHANNEL_MAP = {
 }
 
 
-async def push_all_channels():
+async def push_all_channels(job_filter: str = None):
     """
     Main entry point: for each user with webhooks configured,
-    build and send embeds to all their active channels concurrently.
+    build and send embeds to their active channels concurrently.
     """
     configs = get_all_user_webhooks()
-    print(f"📡 Processing Discord push for {len(configs)} user(s)...")
+    print(f"📡 Processing Discord push (Filter: {job_filter or 'All'}) for {len(configs)} user(s)...")
 
     tasks = []
     for config in configs:
         user_id = str(config["user_id"])
         for webhook_key, build_fn in CHANNEL_MAP.items():
+            # If a filter is provided (e.g., 'posts'), only process that channel
+            if job_filter and job_filter not in webhook_key:
+                continue
+
             webhook_url = config.get(webhook_key)
             if not webhook_url:
                 continue
@@ -285,21 +297,29 @@ async def push_all_channels():
                 if webhook_key == "discord_webhook_heatmap":
                     embeds = build_fn(user_id)
                 else:
-                    embeds = build_fn(user_id, interval_mins=30)
+                    embeds = build_fn(user_id, interval_mins=SCRAPE_INTERVAL)
 
                 if embeds:
                     tasks.append(send_embeds(webhook_url, embeds))
+                else:
+                    # Provide feedback when there's no new data as requested by user
+                    channel_name = webhook_key.replace("discord_webhook_", "").replace("_", " ").capitalize()
+                    no_data_msg = {
+                        "content": f"ℹ️ **KOL Monitor**: No new updates for **{channel_name}** in the last {SCRAPE_INTERVAL} minutes."
+                    }
+                    tasks.append(send_discord_async(webhook_url, no_data_msg))
             except Exception as e:
                 print(f"⚠️ Error building {webhook_key} for {user_id}: {e}")
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-        print(f"✅ Sent {len(tasks)} Discord webhook batches")
+        print(f"✅ Sent {len(tasks)} Discord webhook batch(es)")
     else:
-        print("ℹ️ No new data to push to Discord")
+        print("ℹ️ No data to push to Discord for this filter")
 
 
-def run_discord_push():
-    """Synchronous wrapper for APScheduler."""
+if __name__ == "__main__":
+    import sys
+    job_type = sys.argv[1] if len(sys.argv) > 1 else None
     print(f"\n[{datetime.utcnow().strftime('%H:%M:%S')}] Running Discord Push...")
-    asyncio.run(push_all_channels())
+    asyncio.run(push_all_channels(job_type))

@@ -232,7 +232,7 @@
   </div>
 
   <script>
-    const API = 'http://localhost:3001/api';
+    const API = 'https://kol-monitor-production.up.railway.app/api';
 
     // --- Supabase Auth Integration ---
     const SUPABASE_URL = 'https://cxjeofxpfzdfqoppkosg.supabase.co';
@@ -293,12 +293,11 @@
 
       try {
         const res = await fetch(url, { ...options, headers });
-        if (res.status === 401) {
-          window.location.href = '/login.html';
-          return;
-        }
         if (!res.ok) {
           const errorText = await res.text();
+          if (res.status === 401) {
+            alert(`Auth Error 401: ${errorText}. Please check the Supabase JWT Secret in the backend .env!`);
+          }
           throw new Error(`API error: ${res.status} ${res.statusText} - ${errorText}`);
         }
         return await res.json();
@@ -307,11 +306,220 @@
         throw e;
       }
     }
-
     async function refreshAll() {
       await loadStats();
       await loadTabContent(currentTab);
       document.getElementById('lastUpdate').textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+    }
+
+    let currentTab = 'overview';
+    let kolsData = [];
+
+    // ---------- Tab Switching ----------
+    function switchTab(tab) {
+      currentTab = tab;
+      document.querySelectorAll('[id^="tab-"]').forEach(el => {
+        el.className = el.id === `tab-${tab}` ? 'tab-active px-4 py-2 rounded-lg text-sm font-medium transition' : 'tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition';
+      });
+      loadTabContent(tab);
+    }
+
+    async function loadTabContent(tab) {
+      const content = document.getElementById('content');
+      content.innerHTML = '<div class="text-center py-12 text-slate-500 pulse">Loading...</div>';
+
+      switch (tab) {
+        case 'overview': await renderOverview(content); break;
+        case 'posts': await renderPosts(content); break;
+        case 'interactions': await renderInteractions(content); break;
+        case 'connections': await renderConnections(content); break;
+        case 'metrics': await renderMetrics(content); break;
+        case 'engagement': await renderEngagementTracker(content); break;
+        case 'dms': await renderDms(content); break;
+        case 'settings': await renderSettings(content); break;
+        case 'heatmaps': await renderHeatmaps(content); break;
+      }
+    }
+
+
+    async function renderHeatmaps(el) {
+      el.innerHTML = `
+      <div class="card p-6 card-glow">
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-xl font-bold flex items-center text-white"><i data-lucide="bar-chart-2" class="mr-2 text-blue-400"></i> Historical X KOL Posts (Bubble Heatmap)</h2>
+          <button onclick="switchTab('heatmaps')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow-sm text-sm transition">Refresh Data</button>
+        </div>
+        <div class="text-sm text-slate-400 mb-6">
+          <p><strong>X-Axis:</strong> Timeline (Published Date) &nbsp;|&nbsp; <strong>Y-Axis:</strong> Views &nbsp;|&nbsp; <strong>Bubble Size:</strong> Engagement Rate ((Replies+Reposts+Likes+Bookmarks)/Views) &nbsp;|&nbsp; <strong>Bubble Color:</strong> Reposts + Bookmarks (darker/redder = higher value)</p>
+        </div>
+        <div id="heatmapContainer" class="space-y-8">
+            <p class="text-slate-400">Loading historical data...</p>
+        </div>
+      </div>
+    `;
+      lucide.createIcons();
+
+      const container = document.getElementById('heatmapContainer');
+      try {
+        const data = await fetchJson('/api/twitter_posts?days=90&limit=5000');
+        const posts = data.posts;
+
+        if (!posts || posts.length === 0) {
+          container.innerHTML = '<p class="text-slate-400">No historical posts found.</p>';
+          return;
+        }
+
+        const kols = {};
+        posts.forEach(p => {
+          if (!kols[p.kol_name]) kols[p.kol_name] = [];
+          kols[p.kol_name].push(p);
+        });
+
+        container.innerHTML = '';
+
+        for (const kolName of Object.keys(kols)) {
+          const kolPosts = kols[kolName];
+          let maxEngagement = 0;
+
+          const datasets = [{
+            label: 'Posts',
+            data: kolPosts.map(p => {
+              const views = p.views || Math.max(1, p.likes * 10);
+              const engagementTotal = (p.likes || 0) + (p.reposts || 0) + (p.comments || 0) + (p.bookmarks || 0);
+              const engagementRate = engagementTotal / views;
+              if (engagementRate > maxEngagement) maxEngagement = engagementRate;
+
+              const valueScore = (p.reposts || 0) + (p.bookmarks || 0);
+
+              // Add small jitter to Y axis to prevent overlapping
+              const jitter = (Math.random() - 0.5) * (views * 0.1);
+
+              return {
+                x: new Date(p.posted_at || p.captured_at).getTime(),
+                y: Math.max(1, views + jitter),
+                r: engagementRate,
+                valueScore: valueScore,
+                raw: p
+              };
+            }),
+            backgroundColor: function (context) {
+              const val = context.raw?.valueScore || 0;
+              const intensity = Math.min(1, val / 50);
+              const r = Math.round(59 + (239 - 59) * intensity);
+              const g = Math.round(130 - (130 * intensity));
+              const b = Math.round(246 - (246 * intensity));
+              return `rgba(${r}, ${g}, ${b}, 0.5)`;
+            },
+            borderColor: 'rgba(255,255,255,0.4)',
+            borderWidth: 1
+          }];
+
+          datasets[0].data.forEach(d => {
+            let radius = d.r / (maxEngagement || 1) * 20;
+            if (radius < 4) radius = 4;
+            d.r = radius;
+          });
+
+          let maxTime = new Date().getTime() + (24 * 60 * 60 * 1000);
+          let minTime = new Date().getTime() - 90 * 24 * 60 * 60 * 1000;
+          if (datasets[0].data.length > 0) {
+            minTime = Math.min(...datasets[0].data.map(d => d.x)) - (24 * 60 * 60 * 1000);
+            maxTime = Math.max(...datasets[0].data.map(d => d.x)) + (24 * 60 * 60 * 1000);
+          }
+          const daysCount = Math.max(1, (maxTime - minTime) / (24 * 60 * 60 * 1000));
+
+          const wrapper = document.createElement('div');
+          wrapper.className = 'bg-slate-800 p-4 rounded-lg border border-slate-700';
+          const chartId = `chart-${kolName.replace(/\\W/g, '')}`;
+          wrapper.innerHTML = `<h3 class="font-bold text-lg mb-4 text-blue-300">${kolName}</h3><div style="height: 300px; position: relative;"><canvas id="${chartId}"></canvas></div>`;
+          container.appendChild(wrapper);
+
+          const ctx = document.getElementById(chartId).getContext('2d');
+          const myChart = new Chart(ctx, {
+            type: 'bubble',
+            data: { datasets: datasets },
+
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              onClick: (e, elements, chart) => {
+                if (elements.length > 0) {
+                  const datasetIndex = elements[0].datasetIndex;
+                  const index = elements[0].index;
+                  const post = chart.data.datasets[datasetIndex].data[index].raw;
+                  if (post.post_url) {
+                    window.open(post.post_url, '_blank');
+                  }
+                }
+              },
+              plugins: {
+                legend: { display: false },
+                tooltip: {
+                  callbacks: {
+                    label: function (context) {
+                      const p = context.raw.raw;
+                      const dateStr = new Date(p.posted_at || p.captured_at).toLocaleString();
+                      const viewsText = p.views ? p.views : (p.likes * 10) + ' (est.)';
+                      return [
+                        `Time: ${dateStr}`,
+                        `Views: ${viewsText}, Likes: ${p.likes || 0}, Reposts: ${p.reposts || 0}, Replies: ${p.comments || 0}, Bookmarks: ${p.bookmarks || 0}`,
+                        `Engagement Rate: ${((context.raw.r / 20) * maxEngagement * 100).toFixed(2)}%`,
+                        `Text: ${p.content ? p.content.substring(0, 50) + '...' : ''}`
+                      ];
+                    }
+                  }
+                },
+                zoom: {
+                  pan: {
+                    enabled: true,
+                    mode: 'x',
+                  },
+                  zoom: {
+                    wheel: { enabled: true },
+                    drag: { enabled: true },
+                    pinch: { enabled: true },
+                    mode: 'x',
+                  }
+                }
+              },
+              scales: {
+                x: {
+                  type: 'linear',
+                  position: 'bottom',
+                  max: maxTime,
+                  min: minTime,
+                  ticks: {
+                    callback: function (value) {
+                      if (daysCount <= 3) {
+                        return new Date(value).toLocaleString();
+                      }
+                      return new Date(value).toLocaleDateString();
+                    },
+                    color: '#94a3b8'
+                  },
+                  grid: { color: '#334155' }
+                },
+                y: {
+                  type: 'logarithmic',
+                  title: { display: true, text: 'Views (Log Scale)', color: '#94a3b8' },
+                  ticks: {
+                    color: '#94a3b8',
+                    callback: function (value) {
+                      if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M';
+                      if (value >= 1000) return (value / 1000).toFixed(1) + 'K';
+                      return value;
+                    }
+                  },
+                  grid: { color: '#334155' }
+                }
+              }
+            }
+          });
+        }
+      } catch (e) {
+        console.error(e);
+        container.innerHTML = '<p class="text-red-400">Failed to load heatmaps.</p>';
+      }
     }
 
     async function loadStats() {
@@ -338,6 +546,50 @@
     function truncate(text, len = 120) {
       if (!text) return '-';
       return text.length > len ? text.slice(0, len) + '...' : text;
+    }
+
+    let discordIntervalId = null;
+    function startDiscordCountdown(mins) {
+      if (discordIntervalId) clearInterval(discordIntervalId);
+      const intervalMs = mins * 60 * 1000;
+
+      // Load or initialize persistent next push time
+      let nextPushTime = parseInt(localStorage.getItem('nextPushTime'));
+      const now = Date.now();
+
+      // If never set or in the deep past (stale), initialize it
+      if (!nextPushTime || (now - nextPushTime) > intervalMs) {
+        nextPushTime = now + intervalMs;
+        localStorage.setItem('nextPushTime', nextPushTime);
+      } else if (nextPushTime < now) {
+        // If it passed while page was closed, cycle it forward
+        while (nextPushTime < now) {
+          nextPushTime += intervalMs;
+        }
+        localStorage.setItem('nextPushTime', nextPushTime);
+      }
+
+      const updateDisplay = () => {
+        const now = Date.now();
+        let remaining = nextPushTime - now;
+
+        if (remaining <= 0) {
+          nextPushTime = Date.now() + intervalMs;
+          localStorage.setItem('nextPushTime', nextPushTime);
+          remaining = intervalMs;
+        }
+
+        const el = document.getElementById('discordTimerDisplay');
+        if (el) {
+          const totalSecs = Math.max(0, Math.floor(remaining / 1000));
+          const m = Math.floor(totalSecs / 60);
+          const s = totalSecs % 60;
+          el.innerText = `${m}:${s.toString().padStart(2, '0')}`;
+        }
+      };
+
+      updateDisplay();
+      discordIntervalId = setInterval(updateDisplay, 1000);
     }
 
     function timeAgo(dateStr) {
@@ -542,9 +794,8 @@
     `;
 
       try {
-        const endpoint = type === 'reposts' ? `/api/post_reposts?post_id=${postId}` : `/api/post_replies?post_id=${postId}`;
-        const res = await fetch(endpoint);
-        const data = await res.json();
+        const endpoint = type === 'reposts' ? `${API}/post_reposts?post_id=${postId}` : `${API}/post_replies?post_id=${postId}`;
+        const data = await fetchJson(endpoint);
         const list = type === 'reposts' ? data.reposts : data.replies;
 
         if (!list || list.length === 0) {
@@ -588,8 +839,13 @@
       el.innerHTML = `
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-semibold text-white">KOL Overview (${data.kols.length})</h2>
-      <input type="text" id="searchKol" oninput="filterKols()" placeholder="Search KOLs..." 
-        class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none w-64">
+      <div class="flex items-center gap-3">
+        <input type="text" id="searchKol" oninput="filterKols()" placeholder="Search KOLs..." 
+          class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none w-64">
+        <button onclick="removeAllKolsOverview()" class="text-xs bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded-lg border border-red-500/20 font-bold uppercase transition focus:outline-none">
+          Delete All
+        </button>
+      </div>
     </div>
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
@@ -736,9 +992,26 @@
     }
 
     async function renderSettings(el) {
-      const profile = await fetchJson(`${API}/auth/profile`);
+      const profile = await fetchJson(`${API}/settings`);
+      const config = await fetchJson(`${API}/config`);
       const kolsResponse = await fetchJson(`${API}/kols`);
       const kols = kolsResponse.kols || kolsResponse || [];
+
+      // Only start timer if all 3 conditions met: 1+ webhook, 1+ KOL, and X cookies saved
+      const hasWebhook = profile.discord_webhook_posts || profile.discord_webhook_interactions ||
+        profile.discord_webhook_heatmap || profile.discord_webhook_following ||
+        profile.discord_webhook_followers;
+      const hasKols = kols.length > 0;
+      const hasCookies = profile.twitter_auth_token && profile.twitter_ct0;
+
+      if (hasWebhook && hasKols && hasCookies && config && config.scrape_interval) {
+        startDiscordCountdown(config.scrape_interval);
+      } else {
+        if (discordIntervalId) {
+          clearInterval(discordIntervalId);
+          discordIntervalId = null;
+        }
+      }
 
       el.innerHTML = `
     <h2 class="text-xl font-bold text-white mb-6">⚙️ SaaS System Settings</h2>
@@ -777,41 +1050,67 @@
 
         <!-- Discord Webhooks -->
         <div class="card p-5 border-l-4 border-l-purple-500">
-          <h3 class="font-bold text-white mb-4 flex items-center gap-2">
-            <i data-lucide="bell" class="w-4 h-4 text-purple-400"></i>
-            My Discord Notifications
-          </h3>
-          <p class="text-xs text-slate-400 mb-4">Paste your Discord channel webhooks below to receive alerts.</p>
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="font-bold text-white flex items-center gap-2">
+              <i data-lucide="bell" class="w-4 h-4 text-purple-400"></i>
+              My Discord Notifications
+            </h3>
+            <div class="bg-slate-900/50 border border-slate-700/50 px-3 py-1 rounded-full flex items-center gap-2">
+              <span class="text-[10px] text-slate-500 uppercase font-bold">Next Push:</span>
+              <span id="discordTimerDisplay" class="text-xs font-mono text-purple-400 font-bold">--:--</span>
+            </div>
+          </div>
+          <p class="text-xs text-slate-400 mb-4">Paste your Discord channel webhooks below to receive alerts every **${config.scrape_interval || 15} minutes** once you have at least 1 KOL added and your X cookies saved.</p>
           
           <div class="space-y-4">
             <div>
               <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">New Posts Webhook</label>
-              <input id="hook_posts" type="text" value="${profile.discord_webhook_posts || ''}" 
-                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+              <div class="flex gap-2">
+                <input id="hook_posts" type="text" value="${profile.discord_webhook_posts || ''}" 
+                  class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+                <button onclick="triggerDiscordPush('posts', this)" class="text-[10px] bg-blue-500/10 text-blue-400 hover:bg-blue-500 hover:text-white px-2 py-1 rounded border border-blue-500/20 font-bold transition whitespace-nowrap">Push Now</button>
+              </div>
             </div>
             <div>
               <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Interactions Webhook</label>
-              <input id="hook_interactions" type="text" value="${profile.discord_webhook_interactions || ''}" 
-                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+              <div class="flex gap-2">
+                <input id="hook_interactions" type="text" value="${profile.discord_webhook_interactions || ''}" 
+                  class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+                <button onclick="triggerDiscordPush('interactions', this)" class="text-[10px] bg-blue-500/10 text-blue-400 hover:bg-blue-500 hover:text-white px-2 py-1 rounded border border-blue-500/20 font-bold transition whitespace-nowrap">Push Now</button>
+              </div>
             </div>
             <div>
               <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Heatmap Webhook</label>
-              <input id="hook_heatmap" type="text" value="${profile.discord_webhook_heatmap || ''}" 
-                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+              <div class="flex gap-2">
+                <input id="hook_heatmap" type="text" value="${profile.discord_webhook_heatmap || ''}" 
+                  class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+                <button onclick="triggerDiscordPush('heatmap', this)" class="text-[10px] bg-blue-500/10 text-blue-400 hover:bg-blue-500 hover:text-white px-2 py-1 rounded border border-blue-500/20 font-bold transition whitespace-nowrap">Push Now</button>
+              </div>
             </div>
             <div>
               <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Following Webhook</label>
-              <input id="hook_following" type="text" value="${profile.discord_webhook_following || ''}" 
-                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+              <div class="flex gap-2">
+                <input id="hook_following" type="text" value="${profile.discord_webhook_following || ''}" 
+                  class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+                <button onclick="triggerDiscordPush('following', this)" class="text-[10px] bg-blue-500/10 text-blue-400 hover:bg-blue-500 hover:text-white px-2 py-1 rounded border border-blue-500/20 font-bold transition whitespace-nowrap">Push Now</button>
+              </div>
             </div>
             <div>
               <label class="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Followers Webhook</label>
-              <input id="hook_followers" type="text" value="${profile.discord_webhook_followers || ''}" 
-                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+              <div class="flex gap-2">
+                <input id="hook_followers" type="text" value="${profile.discord_webhook_followers || ''}" 
+                  class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none">
+                <button onclick="triggerDiscordPush('followers', this)" class="text-[10px] bg-blue-500/10 text-blue-400 hover:bg-blue-500 hover:text-white px-2 py-1 rounded border border-blue-500/20 font-bold transition whitespace-nowrap">Push Now</button>
+              </div>
             </div>
-            <button onclick="saveWebhooks()" class="w-full bg-purple-600 hover:bg-purple-700 text-white rounded-lg py-2 text-sm font-bold transition">
-              Save Webhook Settings
-            </button>
+            <div class="flex gap-2">
+              <button onclick="saveWebhooks()" class="flex-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg py-2 text-sm font-bold transition">
+                Save Webhook Settings
+              </button>
+              <button onclick="triggerDiscordPush('all', this)" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg py-2 px-4 text-sm font-bold transition">
+                Push All
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1015,15 +1314,8 @@
       btn.disabled = true;
 
       try {
-        // Sequentially update each KOL
         for (const data of payload) {
-          let targetUrl = `${API}/kols/${data.id}`;
-          // Map to 3000 if using mock local UI
-          if (typeof window !== 'undefined' && window.location.port === '8000') {
-            targetUrl = window.location.origin.replace(':8000', ':3000') + `/api/kols/${data.id}`;
-          }
-
-          const res = await fetch(targetUrl, {
+          await fetchJson(`${API}/kols/${data.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1032,7 +1324,6 @@
               dm_time: data.dm_time
             })
           });
-          if (!res.ok) throw new Error('API Error updating KOL ' + data.id);
         }
 
         alert('Private Message Schedules saved successfully!');
@@ -1051,10 +1342,10 @@
       if (!auth || !ct0) { alert("Please enter both tokens."); return; }
 
       try {
-        const res = await fetchJson('/api/config/cookies', {
+        const res = await fetchJson(`${API}/settings/cookies`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ auth_token: auth, ct0: ct0, user_id: getUserId() })
+          body: JSON.stringify({ auth_token: auth, ct0: ct0 })
         });
         alert("Success: " + res.message);
         document.getElementById('token_auth').value = '';
@@ -1073,13 +1364,35 @@
       };
 
       try {
-        const res = await fetchJson(`/api/auth/profile?user_id=${getUserId()}`, {
+        const res = await fetchJson(`${API}/settings/webhooks`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(data)
         });
         alert("Success: Webhooks saved.");
       } catch (e) { alert("Error saving webhooks."); }
+    }
+
+    async function triggerDiscordPush(channel, btn) {
+      const originalText = btn.innerText;
+      btn.innerText = 'Pushing...';
+      btn.disabled = true;
+      btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+      try {
+        const res = await fetchJson(`${API}/discord/push`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel })
+        });
+        alert(res.message);
+      } catch (e) {
+        alert("Error triggering push: " + e.message);
+      } finally {
+        btn.innerText = originalText;
+        btn.disabled = false;
+        btn.classList.remove('opacity-50', 'cursor-not-allowed');
+      }
     }
 
     // ---------- Actions ----------
@@ -1098,14 +1411,8 @@
       const body = {
         name: name,
         twitter_url: url,
-        category: 'X KOL',
-        user_id: getUserId()
+        category: 'X KOL'
       };
-
-      let targetUrl = `${API}/kols`;
-      if (window.location.origin.includes(':8000')) {
-        targetUrl = window.location.origin.replace(':8000', ':3000') + '/api/kols';
-      }
 
       const btn = e.target.querySelector('button[type="submit"]');
       const originalText = btn.innerText;
@@ -1113,12 +1420,11 @@
       btn.disabled = true;
 
       try {
-        const res = await fetch(targetUrl, {
+        await fetchJson(`${API}/kols`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
-        if (!res.ok) throw new Error("API failed");
         hideAddKol();
         refreshAll();
         document.getElementById('addTwitter').value = '';
@@ -1132,28 +1438,27 @@
 
     async function deleteKol(id) {
       if (!confirm('Remove this KOL from monitoring?')) return;
-      let targetUrl = `${API}/kols/${id}`;
-      if (window.location.origin.includes(':8000')) {
-        targetUrl = window.location.origin.replace(':8000', ':3000') + `/api/kols/${id}`;
-      }
-      await fetch(targetUrl, { method: 'DELETE' });
+      await fetchJson(`${API}/kols/${id}`, { method: 'DELETE' });
       renderSettings(document.getElementById('content'));
     }
 
     async function removeAllKols() {
       if (!confirm('DANGER: This will delete ALL your tracked KOLs and their historical data. Are you sure?')) return;
 
-      let targetUrl = `${API}/kols/all?user_id=${getUserId()}`;
-      if (window.location.origin.includes(':8000')) {
-        targetUrl = window.location.origin.replace(':8000', ':3000') + `/api/kols/all?user_id=${getUserId()}`;
-      }
+      try {
+        await fetchJson(`${API}/kols/all`, { method: 'DELETE' });
+        alert("All KOLs have been removed.");
+        renderSettings(document.getElementById('content'));
+      } catch (e) { alert("Error removing all KOLs."); }
+    }
+
+    async function removeAllKolsOverview() {
+      if (!confirm('DANGER: This will delete ALL your tracked KOLs and their historical data. Are you sure?')) return;
 
       try {
-        const res = await fetch(targetUrl, { method: 'DELETE' });
-        if (res.ok) {
-          alert("All KOLs have been removed.");
-          renderSettings(document.getElementById('content'));
-        }
+        await fetchJson(`${API}/kols/all`, { method: 'DELETE' });
+        alert("All KOLs have been removed.");
+        renderOverview(document.getElementById('content'));
       } catch (e) { alert("Error removing all KOLs."); }
     }
 
@@ -1161,36 +1466,41 @@
       const text = document.getElementById('bulkImport').value.trim();
       if (!text) return;
 
+      const btn = document.querySelector('[onclick="bulkImportKols()"]');
+      const originalText = btn.innerText;
+      btn.disabled = true;
+      btn.classList.add('opacity-50', 'cursor-not-allowed');
+
       const lines = text.split('\n');
+      const validLines = lines.filter(l => l.trim() && l.trim().startsWith('http'));
       let imported = 0;
 
-      let targetUrl = `${API}/kols`;
-      if (window.location.origin.includes(':8000')) {
-        targetUrl = window.location.origin.replace(':8000', ':3000') + '/api/kols';
-      }
-
-      for (const line of lines) {
+      for (const line of validLines) {
         const url = line.trim();
-        if (!url || !url.startsWith('http')) continue;
 
         // Extract username from URL for initial name
         let name = url.split('/').pop() || 'X KOL';
         if (name.includes('?')) name = name.split('?')[0];
 
         const body = {
-          user_id: getUserId(),
           name: name,
           twitter_url: url,
           category: 'X KOL'
         };
 
-        await fetch(targetUrl, {
+        btn.innerText = `Importing ${imported + 1} / ${validLines.length}...`;
+
+        await fetchJson(`${API}/kols`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
         imported++;
       }
+
+      btn.innerText = originalText;
+      btn.disabled = false;
+      btn.classList.remove('opacity-50', 'cursor-not-allowed');
 
       alert(`Successfully imported ${imported} X profiles. Scraper will fetch full details on next run.`);
       document.getElementById('bulkImport').value = '';

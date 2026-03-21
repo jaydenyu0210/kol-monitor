@@ -6,16 +6,9 @@ import psycopg2
 import psycopg2.extras
 from playwright.async_api import async_playwright
 
-from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER, TWITTER_AUTH_TOKEN, TWITTER_CT0, HEADLESS, SLOW_MO
+from db import get_db, release_db
+from config import HEADLESS, SLOW_MO
 
-def get_db():
-    return psycopg2.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD
-    )
 
 async def send_dm(page, handle, message):
     try:
@@ -58,95 +51,98 @@ async def main():
     current_time_str = datetime.now().strftime("%H:%M")
     
     db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # 1. Fetch KOLs scheduled for today whose time has passed, but haven't been sent a DM today
-    cur.execute("""
-        SELECT k.*, u.id as u_id
-        FROM kols k
-        JOIN users u ON k.user_id = u.id
-        WHERE k.status = 'active'
-        AND k.dm_text IS NOT NULL AND k.dm_text != ''
-        AND k.dm_day = %s
-        AND k.dm_time <= %s
-        AND k.id NOT IN (
-            SELECT kol_id FROM dm_logs 
-            WHERE DATE(sent_at) = CURRENT_DATE AND status = 'sent' AND direction = 'outbound'
-        )
-    """, (current_day, current_time_str))
-    
-    pending_dms = cur.fetchall()
-    if not pending_dms:
-        print("✅ No pending scheduled DMs for this time window.")
-        db.close()
-        return
-
-    print(f"📨 Found {len(pending_dms)} DMs to send today.")
-    
-    # Group by user_id to reuse Playwright context per user
-    dms_by_user = {}
-    for dm in pending_dms:
-        uid = dm['u_id']
-        if uid not in dms_by_user: dms_by_user[uid] = []
-        dms_by_user[uid].append(dm)
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=HEADLESS, args=['--no-sandbox'])
+        # Fetch KOLs scheduled for today whose time has passed, but haven't been sent a DM today
+        cur.execute("""
+            SELECT k.*, k.user_id as u_id
+            FROM kols k
+            WHERE k.status = 'active'
+            AND k.dm_text IS NOT NULL AND k.dm_text != ''
+            AND k.dm_day = %s
+            AND k.dm_time <= %s
+            AND k.id NOT IN (
+                SELECT kol_id FROM dm_logs 
+                WHERE DATE(sent_at) = CURRENT_DATE AND status = 'sent' AND direction = 'outbound'
+            )
+        """, (current_day, current_time_str))
         
-        for user_id, user_dms in dms_by_user.items():
-            print(f"--- Sending DMs for User ID: {user_id} ---")
-            
-            creds_path = f"/app/credentials/twitter_{user_id}.json"
-            if os.path.exists(creds_path):
-                with open(creds_path) as f:
-                    creds = json.load(f)
-                    user_auth = creds['auth_token']
-                    user_ct0 = creds['ct0']
-            else:
-                user_auth = TWITTER_AUTH_TOKEN
-                user_ct0 = TWITTER_CT0
+        pending_dms = cur.fetchall()
+        if not pending_dms:
+            print("✅ No pending scheduled DMs for this time window.")
+            return
 
-            context = await browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36')
-            await context.add_cookies([
-                {'name': 'auth_token', 'value': user_auth, 'domain': '.x.com', 'path': '/'},
-                {'name': 'ct0', 'value': user_ct0, 'domain': '.x.com', 'path': '/'}
-            ])
+        print(f"📨 Found {len(pending_dms)} DMs to send today.")
+        
+        # Group by user_id to reuse Playwright context per user
+        dms_by_user = {}
+        for dm in pending_dms:
+            uid = str(dm['u_id'])
+            if uid not in dms_by_user: dms_by_user[uid] = []
+            dms_by_user[uid].append(dm)
             
-            page = await context.new_page()
-            try:
-                await page.goto("https://x.com", wait_until="domcontentloaded", timeout=30000)
-                if "login" in page.url:
-                    print(f"❌ User {user_id}: Twitter/X login failed! Cannot send DMs.")
-                    await context.close()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=HEADLESS, args=['--no-sandbox'])
+            
+            for user_id, user_dms in dms_by_user.items():
+                print(f"--- Sending DMs for User ID: {user_id} ---")
+                
+                # Fetch X cookies from user_configs table
+                cur.execute("""
+                    SELECT twitter_auth_token, twitter_ct0 
+                    FROM user_configs WHERE user_id = %s
+                """, (user_id,))
+                config_row = cur.fetchone()
+                
+                if not config_row or not config_row.get('twitter_auth_token'):
+                    print(f"⚠️ User {user_id}: No X cookies configured. Skipping.")
                     continue
-                    
-                # Send DMs for this user
-                for idx, kol in enumerate(user_dms):
-                    handle = kol['twitter_url'].split('/')[-1] if kol['twitter_url'] else kol['name']
-                    print(f"  ✉️ Sending DM to {handle}...")
-                    
-                    success = await send_dm(page, handle, kol['dm_text'])
-                    
-                    # Log attempt
-                    cur.execute("""
-                        INSERT INTO dm_logs (kol_id, platform, direction, content, status, sent_at)
-                        VALUES (%s, 'twitter', 'outbound', %s, %s, NOW())
-                    """, (kol['id'], kol['dm_text'], 'sent' if success else 'failed'))
-                    db.commit()
-                    
-                    if success:
-                        print(f"  ✅ Sent successfully.")
-                    
-                    if idx < len(user_dms) - 1:
-                        await asyncio.sleep(5)  # Pause between DMs
-            except Exception as e:
-                print(f"❌ User {user_id}: Critical DM error: {e}")
+                
+                user_auth = config_row['twitter_auth_token']
+                user_ct0 = config_row['twitter_ct0']
+
+                context = await browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36')
+                await context.add_cookies([
+                    {'name': 'auth_token', 'value': user_auth, 'domain': '.x.com', 'path': '/'},
+                    {'name': 'ct0', 'value': user_ct0, 'domain': '.x.com', 'path': '/'}
+                ])
+                
+                page = await context.new_page()
+                try:
+                    await page.goto("https://x.com", wait_until="domcontentloaded", timeout=30000)
+                    if "login" in page.url:
+                        print(f"❌ User {user_id}: Twitter/X login failed! Cannot send DMs.")
+                        await context.close()
+                        continue
+                        
+                    # Send DMs for this user
+                    for idx, kol in enumerate(user_dms):
+                        handle = kol['twitter_url'].split('/')[-1] if kol['twitter_url'] else kol['name']
+                        print(f"  ✉️ Sending DM to {handle}...")
+                        
+                        success = await send_dm(page, handle, kol['dm_text'])
+                        
+                        # Log attempt
+                        cur.execute("""
+                            INSERT INTO dm_logs (kol_id, platform, direction, content, status, sent_at)
+                            VALUES (%s, 'twitter', 'outbound', %s, %s, NOW())
+                        """, (kol['id'], kol['dm_text'], 'sent' if success else 'failed'))
+                        db.commit()
+                        
+                        if success:
+                            print(f"  ✅ Sent successfully.")
+                        
+                        if idx < len(user_dms) - 1:
+                            await asyncio.sleep(5)  # Pause between DMs
+                except Exception as e:
+                    print(f"❌ User {user_id}: Critical DM error: {e}")
+                
+                await context.close()
             
-            await context.close()
-        
-        await browser.close()
-    
-    db.close()
+            await browser.close()
+    finally:
+        release_db(db)
     print("🏁 Scheduled DMs check complete.")
 
 if __name__ == "__main__":

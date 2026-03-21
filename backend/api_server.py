@@ -22,7 +22,7 @@ app = FastAPI(title="KOL Monitor Pro API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:5173"],
+    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://127.0.0.1:8080"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -140,18 +140,6 @@ def update_kol(kol_id: int, kol: KolUpdate, user_id: str = Depends(get_current_u
         release_db(db)
 
 
-@app.delete("/api/kols/{kol_id}")
-def delete_kol(kol_id: int, user_id: str = Depends(get_current_user)):
-    db = get_db()
-    try:
-        cur = db.cursor()
-        cur.execute("DELETE FROM kols WHERE id=%s AND user_id=%s", (kol_id, user_id))
-        db.commit()
-        return {"message": "KOL deleted"}
-    finally:
-        release_db(db)
-
-
 @app.delete("/api/kols/all")
 def delete_all_kols(user_id: str = Depends(get_current_user)):
     db = get_db()
@@ -168,10 +156,24 @@ def delete_all_kols(user_id: str = Depends(get_current_user)):
                 SELECT tp.id FROM twitter_posts tp JOIN kols k ON tp.kol_id=k.id WHERE k.user_id=%s
             );
             DELETE FROM twitter_posts WHERE kol_id IN (SELECT id FROM kols WHERE user_id=%s);
+            
+            -- Delete the KOLs themselves
             DELETE FROM kols WHERE user_id=%s;
         """, (user_id, user_id, user_id, user_id, user_id, user_id))
         db.commit()
-        return {"message": "All KOLs deleted"}
+        return {"message": "All KOLs and their historical data deleted"}
+    finally:
+        release_db(db)
+
+
+@app.delete("/api/kols/{kol_id}")
+def delete_kol(kol_id: int, user_id: str = Depends(get_current_user)):
+    db = get_db()
+    try:
+        cur = db.cursor()
+        cur.execute("DELETE FROM kols WHERE id=%s AND user_id=%s", (kol_id, user_id))
+        db.commit()
+        return {"message": "KOL deleted"}
     finally:
         release_db(db)
 
@@ -237,6 +239,13 @@ def list_metrics(
         return {"metrics": cur.fetchall()}
     finally:
         release_db(db)
+
+
+from config import SCRAPE_INTERVAL
+
+@app.get("/api/config")
+def get_backend_config(user_id: str = Depends(get_current_user)):
+    return {"scrape_interval": SCRAPE_INTERVAL}
 
 
 # ---------- Stats Endpoint ----------
@@ -340,6 +349,82 @@ async def test_webhook(data: WebhookSave, user_id: str = Depends(get_current_use
     except httpx.RequestError as e:
         raise HTTPException(400, f"Could not reach webhook: {e}")
     return {"message": f"Test message sent to {data.channel} webhook"}
+
+
+class DiscordPushRequest(BaseModel):
+    channel: str  # "posts", "following", "followers", "heatmap", "interactions", or "all"
+
+
+@app.post("/api/discord/push")
+async def trigger_discord_push(data: DiscordPushRequest, user_id: str = Depends(get_current_user)):
+    """Manually trigger Discord push for a specific channel or all channels."""
+    from discord_push import (
+        build_post_embeds, build_following_embeds, build_follower_embeds,
+        build_heatmap_embeds, build_interaction_embeds, send_embeds
+    )
+
+    # Get user's webhooks
+    db = get_db()
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT discord_webhook_posts, discord_webhook_interactions,
+                   discord_webhook_heatmap, discord_webhook_following,
+                   discord_webhook_followers
+            FROM user_configs WHERE user_id = %s
+        """, (user_id,))
+        config = cur.fetchone()
+    finally:
+        release_db(db)
+
+    if not config:
+        raise HTTPException(404, "No webhook configuration found")
+
+    channel_map = {
+        "posts": ("discord_webhook_posts", build_post_embeds),
+        "following": ("discord_webhook_following", build_following_embeds),
+        "followers": ("discord_webhook_followers", build_follower_embeds),
+        "heatmap": ("discord_webhook_heatmap", build_heatmap_embeds),
+        "interactions": ("discord_webhook_interactions", build_interaction_embeds),
+    }
+
+    channels_to_push = list(channel_map.keys()) if data.channel == "all" else [data.channel]
+    sent = 0
+    no_data = 0
+
+    for ch in channels_to_push:
+        if ch not in channel_map:
+            continue
+        webhook_key, build_fn = channel_map[ch]
+        webhook_url = config.get(webhook_key)
+        if not webhook_url:
+            continue
+
+        try:
+            if ch == "heatmap":
+                embeds = build_fn(user_id)
+            else:
+                embeds = build_fn(user_id, interval_mins=1440)  # Look back 24h for manual trigger
+            
+            if embeds:
+                await send_embeds(webhook_url, embeds)
+                sent += 1
+            else:
+                # Manual trigger also sends "No data" message to Discord as requested
+                from discord_push import send_discord_async
+                channel_display = ch.capitalize()
+                no_data_payload = {
+                    "content": f"ℹ️ **KOL Monitor**: Manual trigger found no new updates for **{channel_display}** in the last 24 hours."
+                }
+                await send_discord_async(webhook_url, no_data_payload)
+                no_data += 1
+        except Exception as e:
+            print(f"⚠️ Error pushing {ch}: {e}")
+
+    msg = f"Pushed {sent} channel(s) to Discord."
+    if no_data:
+        msg += f" {no_data} channel(s) had no new data."
+    return {"message": msg}
 
 
 @app.post("/api/settings/cookies")

@@ -5,8 +5,7 @@
 
 import { getSession } from './auth.js';
 
-// Railway backend URL — replace with your deployed URL
-const RAILWAY_API = 'http://localhost:3001';
+const RAILWAY_API = 'https://kol-monitor-production.up.railway.app';
 
 /**
  * Authenticated fetch wrapper.
@@ -35,14 +34,11 @@ export async function apiFetch(path, options = {}) {
         headers,
     });
 
-    if (res.status === 401) {
-        // Token expired or invalid — force re-login
-        window.location.href = '/login.html';
-        return null;
-    }
-
     if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
+        if (res.status === 401) {
+            alert(`Auth Error 401: ${err.detail || err}. Please check the Supabase JWT Secret in the backend .env!`);
+        }
         throw new Error(err.detail || `API error: ${res.status}`);
     }
 

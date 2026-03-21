@@ -43,15 +43,15 @@ async def main():
     scheduler.add_job(lambda: run_discord_push("heatmap"),      'interval', minutes=SCRAPE_INTERVAL, seconds=60, id='push_heatmap')
     scheduler.add_job(lambda: run_discord_push("interactions"), 'interval', minutes=SCRAPE_INTERVAL, seconds=70, id='push_interactions')
 
-    # DM Scheduler runs every 5 minutes specifically
-    scheduler.add_job(run_dm_scheduler, 'interval', minutes=5, id='dm_scheduler_job')
+    # DM Scheduler runs every SCRAPE_INTERVAL minutes
+    scheduler.add_job(run_dm_scheduler, 'interval', minutes=SCRAPE_INTERVAL, id='dm_scheduler_job')
 
     scheduler.start()
     print(f"📅 KOL Monitor Scheduler Started ({SCRAPE_INTERVAL}m Mode)!")
     print(f"   - Scraper runs every {SCRAPE_INTERVAL} minutes")
     print(f"   - 5 Discord channels updated every {SCRAPE_INTERVAL} minutes")
     print(f"   - Channels: posts, following, followers, heatmap, interactions")
-    print(f"   - DM Scheduler runs every 5 minutes")
+    print(f"   - DM Scheduler runs every {SCRAPE_INTERVAL} minutes")
 
     try:
         while True: await asyncio.sleep(3600)

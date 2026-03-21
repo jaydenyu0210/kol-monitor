@@ -3,6 +3,6 @@ uvicorn[standard]
 psycopg2-binary
 apscheduler
 playwright
-PyJWT
+PyJWT[crypto]
 httpx
 python-dotenv

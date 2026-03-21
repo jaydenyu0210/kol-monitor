@@ -10,11 +10,10 @@ import sys
 from datetime import datetime, timezone
 
 import psycopg2
+import psycopg2.extras
 from playwright.async_api import async_playwright
-from config import DB_DSN, TWITTER_AUTH_TOKEN, TWITTER_CT0, HEADLESS, SLOW_MO
-
-def get_db():
-    return psycopg2.connect(DB_DSN)
+from db import get_db, release_db
+from config import HEADLESS, SLOW_MO
 
 def get_kols(db):
     cur = db.cursor()
@@ -236,58 +235,61 @@ async def scrape_profile(page, kol_id, name, url, db):
 
 async def main():
     db = get_db()
-    
-    # Scrape by User isolation
-    cur = db.cursor()
-    cur.execute("SELECT DISTINCT user_id FROM kols WHERE status = 'active'")
-    users = [r[0] for r in cur.fetchall()]
-    
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=HEADLESS, args=['--no-sandbox'])
+    try:
+        # Scrape by User isolation
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT DISTINCT user_id FROM kols WHERE status = 'active'")
+        users = [str(r['user_id']) for r in cur.fetchall()]
         
-        for user_id in users:
-            print(f"--- Starting Scrape for User ID: {user_id} ---")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=HEADLESS, args=['--no-sandbox'])
             
-            # Load user-specific cookies
-            creds_path = f"/app/credentials/twitter_{user_id}.json"
-            if os.path.exists(creds_path):
-                with open(creds_path) as f:
-                    creds = json.load(f)
-                    user_auth = creds['auth_token']
-                    user_ct0 = creds['ct0']
-            else:
-                user_auth = TWITTER_AUTH_TOKEN
-                user_ct0 = TWITTER_CT0
-
-            context = await browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36')
-            await context.add_cookies([
-                {'name': 'auth_token', 'value': user_auth, 'domain': '.x.com', 'path': '/'},
-                {'name': 'ct0', 'value': user_ct0, 'domain': '.x.com', 'path': '/'}
-            ])
-            
-            page = await context.new_page()
-            try:
-                await page.goto("https://x.com", wait_until="domcontentloaded", timeout=30000)
+            for user_id in users:
+                print(f"--- Starting Scrape for User ID: {user_id} ---")
                 
-                if "login" in page.url:
-                    print(f"❌ User {user_id}: Twitter/X login failed with cookies!")
-                    await context.close()
+                # Fetch X cookies from user_configs table
+                cur.execute("SELECT twitter_auth_token, twitter_ct0 FROM user_configs WHERE user_id = %s", (user_id,))
+                config_row = cur.fetchone()
+                
+                if not config_row or not config_row.get('twitter_auth_token'):
+                    print(f"⚠️ User {user_id}: No X cookies configured. Skipping.")
                     continue
-                print(f"✅ User {user_id}: Twitter/X login successful!")
-
-                # Filter KOLs by this user
-                cur.execute("SELECT id, name, twitter_url FROM kols WHERE status = 'active' AND user_id = %s", (user_id,))
-                kols = cur.fetchall()
                 
-                for kol_id, name, url in kols:
-                    await scrape_profile(page, kol_id, name, url, db)
-                    await asyncio.sleep(SLOW_MO / 1000)
-            except Exception as e:
-                print(f"❌ User {user_id}: Critical scrape error: {e}")
-            
-            await context.close()
-            
-    db.close()
+                user_auth = config_row['twitter_auth_token']
+                user_ct0 = config_row['twitter_ct0']
+
+                context = await browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36')
+                await context.add_cookies([
+                    {'name': 'auth_token', 'value': user_auth, 'domain': '.x.com', 'path': '/'},
+                    {'name': 'ct0', 'value': user_ct0, 'domain': '.x.com', 'path': '/'}
+                ])
+                
+                page = await context.new_page()
+                try:
+                    await page.goto("https://x.com", wait_until="domcontentloaded", timeout=30000)
+                    
+                    if "login" in page.url:
+                        print(f"❌ User {user_id}: Twitter/X login failed with cookies!")
+                        await context.close()
+                        continue
+                    print(f"✅ User {user_id}: Twitter/X login successful!")
+
+                    # Filter KOLs by this user
+                    cur2 = db.cursor()
+                    cur2.execute("SELECT id, name, twitter_url FROM kols WHERE status = 'active' AND user_id = %s", (user_id,))
+                    kols = cur2.fetchall()
+                    
+                    for kol_id, name, url in kols:
+                        await scrape_profile(page, kol_id, name, url, db)
+                        await asyncio.sleep(SLOW_MO / 1000)
+                except Exception as e:
+                    print(f"❌ User {user_id}: Critical scrape error: {e}")
+                
+                await context.close()
+                
+        await browser.close()
+    finally:
+        release_db(db)
 
 if __name__ == "__main__":
     asyncio.run(main())
