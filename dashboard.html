@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KOL Monitor Dashboard</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.tailwindcss.com"></script> <!-- NOTE: CDN is used for simplicity; for production, consider using Tailwind CLI for better performance -->
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
   <style>
@@ -287,7 +287,9 @@
   </div>
 
   <script>
-    const API = '/api';
+    const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      ? 'http://localhost:3001/api'
+      : 'https://kol-monitor-production.up.railway.app/api';
 
     function getUserId() {
       const uid = localStorage.getItem('kol_user_id') || 1;
@@ -571,16 +573,8 @@
 
     // ---------- Data Fetchers ----------
     async function fetchJson(path, options = {}) {
-      const currentPort = window.location.port;
-      let baseUrl = window.location.origin;
-
-      if (currentPort === '8000') {
-        baseUrl = baseUrl.replace(':8000', ':3000');
-      } else if (!currentPort && window.location.protocol === 'http:') { // Default HTTP is 80, assume our app is on 3000
-        baseUrl += ':3000';
-      }
-
-      const url = `${baseUrl}${path}`;
+      // If path doesn't start with http, it's relative to our dynamic API base
+      const url = path.startsWith('http') ? path : `${API}${path.replace('/api', '')}`;
       const connector = url.includes('?') ? '&' : '?';
       const finalUrl = `${url}${connector}user_id=${getUserId()}`;
 

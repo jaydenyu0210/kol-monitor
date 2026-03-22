@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KOL Monitor Dashboard</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.tailwindcss.com"></script> <!-- NOTE: CDN is used for simplicity; for production, consider using Tailwind CLI for better performance -->
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@1.2.1/dist/chartjs-plugin-zoom.min.js"></script>
@@ -300,7 +300,9 @@
   </div>
 
   <script>
-    const API = 'http://127.0.0.1:3001/api';
+    const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      ? 'http://localhost:3001/api'
+      : 'https://kol-monitor-production.up.railway.app/api';
 
     // --- Supabase Auth Integration ---
     const SUPABASE_URL = 'https://cxjeofxpfzdfqoppkosg.supabase.co';
