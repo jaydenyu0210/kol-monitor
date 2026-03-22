@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Supabase Database ---
-# Connected via db.py pool; DATABASE_URL is read there directly.
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # --- Supabase Auth ---
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")

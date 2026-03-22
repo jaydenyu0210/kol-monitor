@@ -4,13 +4,15 @@ Secured with Supabase JWT auth, connected via connection pool.
 """
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from typing import Optional
 
 import psycopg2
 import psycopg2.extras
 import httpx
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -78,6 +80,35 @@ class UserConfigUpdate(BaseModel):
     discord_webhook_heatmap: Optional[str] = None
     discord_webhook_following: Optional[str] = None
     discord_webhook_followers: Optional[str] = None
+
+
+# ---------- Status Sync Helper ----------
+
+def update_system_status(key, value_updates):
+    try:
+        # Add Instance identification to help user distinguish between local and ghost instance
+        if 'current_activity' in value_updates:
+            activity = value_updates['current_activity']
+            if activity and 'Monitor Idle' not in activity:
+                value_updates['current_activity'] = f"{activity} (Instance: Docker-Mac)"
+        
+        db = get_db()
+        try:
+            cur = db.cursor()
+            cur.execute("SELECT value FROM system_status WHERE key = %s", (key,))
+            row = cur.fetchone()
+            status = row[0] if row else {}
+            status.update(value_updates)
+            cur.execute("""
+                INSERT INTO system_status (key, value, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """, (key, json.dumps(status)))
+            db.commit()
+        finally:
+            release_db(db)
+    except Exception as e:
+        print(f"⚠️ Error updating system_status ({key}): {e}")
 
 
 # ---------- KOL Endpoints ----------
@@ -248,6 +279,73 @@ def get_backend_config(user_id: str = Depends(get_current_user)):
     return {"scrape_interval": SCRAPE_INTERVAL}
 
 
+@app.get("/api/scrape_status")
+def get_scrape_status(user_id: str = Depends(get_current_user)):
+    db = get_db()
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Total active KOLs
+        cur.execute("SELECT COUNT(*) as count FROM kols WHERE user_id=%s AND status='active'", (user_id,))
+        total_kols = cur.fetchone()['count']
+        
+        # Get status from system_status (scheduler/manual sync)
+        cur.execute("SELECT value FROM system_status WHERE key = 'twitter_scraper_status'")
+        status_row = cur.fetchone()
+        status_val = status_row['value'] if status_row and status_row['value'] else {}
+        
+        last_start_at = status_val.get('last_start_at')
+        is_running_db = status_val.get('is_running', False)
+        current_activity = status_val.get('current_activity', 'System Idle')
+        next_run_at = status_val.get('next_run_at')
+
+        # Calculate progress anchored to the last scrape start
+        if last_start_at:
+            # Count KOLs updated since the latest round started
+            cur.execute("""
+                SELECT name FROM kols 
+                WHERE user_id=%s AND status='active' AND updated_at >= %s
+                ORDER BY updated_at DESC
+            """, (user_id, last_start_at))
+            scraped_rows = cur.fetchall()
+        else:
+            scraped_rows = []
+        
+        scraped_kols = len(scraped_rows)
+        scraped_names = [r['name'] for r in scraped_rows]
+        
+        # Get absolute last updated time across all active KOLs OR actual post capture
+        cur.execute("""
+            SELECT GREATEST(
+                (SELECT MAX(updated_at) FROM kols WHERE user_id=%s AND status='active'),
+                (SELECT MAX(tp.captured_at) FROM twitter_posts tp JOIN kols k ON tp.kol_id = k.id WHERE k.user_id=%s)
+            ) as last_updated
+        """, (user_id, user_id))
+        max_row = cur.fetchone()
+        last_updated = max_row['last_updated'].isoformat() if max_row and max_row['last_updated'] else None
+        
+        # Get status from system_status (scheduler/manual sync)
+        cur.execute("SELECT value FROM system_status WHERE key = 'twitter_scraper_status'")
+        status_row = cur.fetchone()
+        status_val = status_row['value'] if status_row and status_row['value'] else {}
+        
+        next_run_at = status_val.get('next_run_at')
+        is_running_db = status_val.get('is_running', False)
+        current_activity = status_val.get('current_activity', 'System Idle')
+
+        return {
+            "total": total_kols,
+            "scraped": scraped_kols,
+            "scraped_names": scraped_names,
+            "is_scraping": is_running_db,
+            "current_activity": current_activity,
+            "last_updated": last_updated,
+            "next_run_at": next_run_at
+        }
+    finally:
+        release_db(db)
+
+
 # ---------- Stats Endpoint ----------
 
 @app.get("/api/stats")
@@ -256,40 +354,55 @@ def get_stats(user_id: str = Depends(get_current_user)):
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        # Total active KOLs
+        # 1. Total active KOLs
         cur.execute("SELECT COUNT(*) as count FROM kols WHERE user_id=%s AND status='active'", (user_id,))
         total_kols = cur.fetchone()["count"]
 
-        # Posts in last 24h
+        # 2. Total Posts
+        cur.execute("SELECT COUNT(*) as count FROM twitter_posts tp JOIN kols k ON tp.kol_id = k.id WHERE k.user_id = %s", (user_id,))
+        total_posts = cur.fetchone()["count"]
+
+        # 3. Posts in last 24h
         since_24h = datetime.utcnow() - timedelta(hours=24)
         cur.execute("""
             SELECT COUNT(*) as count FROM twitter_posts tp
             JOIN kols k ON tp.kol_id = k.id
             WHERE k.user_id = %s AND tp.captured_at > %s
         """, (user_id, since_24h))
-        recent_posts = cur.fetchone()["count"]
+        posts_today = cur.fetchone()["count"]
 
-        # Follower delta (latest vs previous snapshot)
+        # 4. Interactions today (sum of counts for posts from last 24h)
         cur.execute("""
-            SELECT COALESCE(SUM(m2.followers_count - m1.followers_count), 0) as delta
+            SELECT COALESCE(SUM(likes + reposts + comments), 0) as count 
+            FROM twitter_posts tp JOIN kols k ON tp.kol_id = k.id
+            WHERE k.user_id = %s AND tp.captured_at > %s
+        """, (user_id, since_24h))
+        interactions_today = int(cur.fetchone()["count"])
+
+        # 5. Connection changes (followers + following deltas)
+        cur.execute("""
+            SELECT COALESCE(SUM(m2.followers_count - m1.followers_count), 0) as f_delta,
+                   COALESCE(SUM(m2.following_count - m1.following_count), 0) as fg_delta
             FROM (
-                SELECT DISTINCT ON (kol_id) kol_id, followers_count
+                SELECT DISTINCT ON (kol_id) kol_id, followers_count, following_count
                 FROM kol_metrics WHERE kol_id IN (SELECT id FROM kols WHERE user_id=%s)
                 ORDER BY kol_id, captured_at DESC
             ) m2
             JOIN (
-                SELECT DISTINCT ON (kol_id) kol_id, followers_count
+                SELECT DISTINCT ON (kol_id) kol_id, followers_count, following_count
                 FROM kol_metrics WHERE kol_id IN (SELECT id FROM kols WHERE user_id=%s)
                 ORDER BY kol_id, captured_at DESC OFFSET 1
             ) m1 ON m2.kol_id = m1.kol_id
         """, (user_id, user_id))
         row = cur.fetchone()
-        follower_delta = row["delta"] if row else 0
+        connection_changes_today = abs(row["f_delta"]) + abs(row["fg_delta"])
 
         return {
             "total_kols": total_kols,
-            "recent_posts": recent_posts,
-            "follower_delta": follower_delta,
+            "posts_today": posts_today,
+            "interactions_today": interactions_today,
+            "connection_changes_today": connection_changes_today,
+            "total_posts": total_posts
         }
     finally:
         release_db(db)
@@ -413,10 +526,7 @@ async def trigger_discord_push(data: DiscordPushRequest, user_id: str = Depends(
                 # Manual trigger also sends "No data" message to Discord as requested
                 from discord_push import send_discord_async
                 channel_display = ch.capitalize()
-                no_data_payload = {
-                    "content": f"ℹ️ **KOL Monitor**: Manual trigger found no new updates for **{channel_display}** in the last 24 hours."
-                }
-                await send_discord_async(webhook_url, no_data_payload)
+                pass
                 no_data += 1
         except Exception as e:
             print(f"⚠️ Error pushing {ch}: {e}")
@@ -442,6 +552,110 @@ def save_cookies(data: CookieSave, user_id: str = Depends(get_current_user)):
         return {"message": "X cookies saved"}
     finally:
         release_db(db)
+
+
+@app.get("/api/overview_feed")
+def get_overview_feed(user_id: str = Depends(get_current_user)):
+    def load_feed(name):
+        path = f"/app/feed_{name}_{user_id}.json"
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Error reading feed {name}: {e}")
+        return []
+
+    return {
+        "recent_posts": load_feed("posts"),
+        "hot_posts": load_feed("heatmap"),
+        "interactions": load_feed("interactions"),
+        "following_changes": load_feed("following"),
+        "follower_changes": load_feed("followers")
+    }
+
+
+@app.get("/api/discord_posts_history")
+def get_discord_posts_history(
+    date: str = None, 
+    sort: str = "recent",
+    tz: str = "UTC",
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Returns all posts captured for this user on a specific day, aligned to a timezone.
+    Used for the enhanced 'New X Posts' historical view on the dashboard.
+    """
+    if not date:
+        date = datetime.utcnow().strftime("%Y-%m-%d")
+        
+    db = get_db()
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        sort_dir = "DESC" if sort == "recent" else "ASC"
+        
+        # Filter by DATE of first_captured_at (discovery time), converted to requested timezone
+        cur.execute(f"""
+            SELECT tp.*, k.name as kol 
+            FROM twitter_posts tp
+            JOIN kols k ON tp.kol_id = k.id
+            WHERE k.user_id = %s 
+              AND (tp.first_captured_at AT TIME ZONE %s)::date = %s
+            ORDER BY tp.first_captured_at {sort_dir}, tp.posted_at {sort_dir}
+        """, (user_id, tz, date))
+        
+        return cur.fetchall()
+    finally:
+        release_db(db)
+
+
+def run_manual_scrape_task():
+    """Background task to run scraper and discord push"""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Manual scrape triggered...")
+    
+    # 0. Set is_running flag
+    db = get_db()
+    try:
+        cur = db.cursor()
+        cur.execute("""
+            INSERT INTO system_status (key, value, updated_at)
+            VALUES ('twitter_scraper_status', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET 
+                value = jsonb_set(
+                    jsonb_set(system_status.value, '{is_running}', 'true'),
+                    '{last_start_at}', %s
+                ), 
+                updated_at = NOW()
+        """, (json.dumps({'is_running': True, 'last_start_at': datetime.now(timezone.utc).isoformat()}), json.dumps(datetime.now(timezone.utc).isoformat())))
+        db.commit()
+    except Exception as e:
+        print(f"⚠️ Error setting manual is_running: {e}")
+    finally:
+        release_db(db)
+
+    try:
+        # 1. Run Scraper
+        subprocess.run([sys.executable, "-u", "/app/twitter_scraper.py"], timeout=3600)
+        # 2. Run Discord Pushes
+        for job in ["posts", "following", "followers", "heatmap", "interactions"]:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Manual Pushing {job.upper()} to Discord...")
+            subprocess.run([sys.executable, "/app/discord_push.py", job], timeout=120)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Manual scrape task complete.")
+    except Exception as e:
+        print(f"❌ Manual scrape task error: {e}")
+    finally:
+        # Clear is_running flag and reset activity
+        update_system_status('twitter_scraper_status', {
+            'is_running': False,
+            'current_activity': 'Monitor Idle - All KOLs up to date'
+        })
+
+
+@app.post("/api/trigger_manual_scrape")
+async def trigger_manual_scrape(background_tasks: BackgroundTasks, user_id: str = Depends(get_current_user)):
+    background_tasks.add_task(run_manual_scrape_task)
+    return {"message": "Manual scrape triggered in background"}
 
 
 # ---------- DM Logs ----------

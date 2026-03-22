@@ -7,7 +7,8 @@
   <title>KOL Monitor Dashboard</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@1.2.1/dist/chartjs-plugin-zoom.min.js"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
@@ -100,6 +101,65 @@
       animation: pulse 2s infinite;
     }
 
+    /* Notification Toasts */
+    #notification-container {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      pointer-events: none;
+    }
+
+    .notification {
+      pointer-events: auto;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      color: white;
+      font-size: 0.875rem;
+      font-weight: 500;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      animation: slideIn 0.3s ease-out;
+      min-width: 200px;
+    }
+
+    @keyframes slideIn {
+      from {
+        transform: translateX(100%);
+        opacity: 0;
+      }
+
+      to {
+        transform: translateX(0);
+        opacity: 1;
+      }
+    }
+
+    .notification-info {
+      background: #3b82f6;
+      border-left: 4px solid #2563eb;
+    }
+
+    .notification-success {
+      background: #10b981;
+      border-left: 4px solid #059669;
+    }
+
+    .notification-error {
+      background: #ef4444;
+      border-left: 4px solid #dc2626;
+    }
+
+    .notification-warning {
+      background: #f59e0b;
+      border-left: 4px solid #d97706;
+    }
+
     @keyframes pulse {
 
       0%,
@@ -117,10 +177,11 @@
       backdrop-filter: blur(4px);
     }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 </head>
 
 <body class="min-h-screen">
+  <div id="notification-container"></div>
 
   <!-- Auth handled by Supabase — redirect to login.html if not authenticated -->
   <div id="loginOverlay" class="fixed inset-0 bg-slate-950 z-[200] flex items-center justify-center p-4 hidden">
@@ -140,39 +201,52 @@
         <p class="text-sm text-slate-400 mt-1">LinkedIn & Twitter KOL Tracking System</p>
       </div>
       <div class="flex items-center gap-3">
-        <span id="lastUpdate" class="text-xs text-slate-500"></span>
-        <button onclick="refreshAll()"
-          class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition">
-          🔄 Refresh
-        </button>
+        <div id="statusContainer" class="flex gap-2">
+          <span id="lastUpdate"
+            class="text-xs text-slate-400 bg-slate-800/50 px-3 py-1.5 rounded-lg border border-slate-700/50 flex items-center"></span>
+          <div class="bg-blue-900/20 border border-blue-900/40 px-3 py-1.5 rounded flex items-center gap-2">
+            <span class="text-[10px] text-blue-400/80 uppercase font-bold tracking-wider">Next cycle in:</span>
+            <span id="headerTimerDisplay" class="text-xs font-mono text-blue-300 font-bold">--:--</span>
+          </div>
+        </div>
         <button onclick="showAddKol()"
           class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition">
           + Add KOL
         </button>
+        <button id="manualScrapeBtn" onclick="triggerManualScrape()"
+          class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium transition hidden">
+          ⚡ Manual Scrape
+        </button>
       </div>
     </div>
 
-    <!-- Stats Cards -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <!-- Scraping Progress (Always Visible) -->
+    <div id="scrapeProgressContainer" class="mb-6 bg-slate-900/50 rounded-lg p-4 border border-blue-500/30">
+      <div class="flex justify-between text-xs text-blue-400 font-medium mb-2 opacity-80">
+        <span id="scrapeProgressText" class="flex items-center">
+          <svg class="animate-spin -ml-1 mr-2 h-3 w-3 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none"
+            viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
+            </path>
+          </svg>
+          Updating 0 / 0 KOLs...
+        </span>
+        <span class="animate-pulse">Live Scraping via Playwright ⚡</span>
+      </div>
+      <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+        <div id="scrapeProgressBar"
+          class="bg-blue-500 h-1.5 rounded-full transition-all duration-500 shadow-[0_0_10px_rgba(59,130,246,0.6)]"
+          style="width: 0%"></div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
       <div class="card card-glow stat-card p-4 cursor-pointer" onclick="switchTab('overview')">
         <div class="text-slate-400 text-xs font-medium mb-1">TOTAL KOLs</div>
         <div id="statKols" class="text-2xl font-bold text-white">-</div>
         <div class="text-xs text-emerald-400 mt-1">● Active</div>
-      </div>
-      <div class="card card-glow stat-card p-4 cursor-pointer" onclick="switchTab('posts')">
-        <div class="text-slate-400 text-xs font-medium mb-1">POSTS TODAY</div>
-        <div id="statPosts" class="text-2xl font-bold text-white">-</div>
-        <div id="statTotalPosts" class="text-xs text-slate-500 mt-1">total: -</div>
-      </div>
-      <div class="card card-glow stat-card p-4 cursor-pointer" onclick="switchTab('interactions')">
-        <div class="text-slate-400 text-xs font-medium mb-1">INTERACTIONS TODAY</div>
-        <div id="statInteractions" class="text-2xl font-bold text-white">-</div>
-        <div class="text-xs text-blue-400 mt-1">comments & likes</div>
-      </div>
-      <div class="card card-glow stat-card p-4 cursor-pointer" onclick="switchTab('connections')">
-        <div class="text-slate-400 text-xs font-medium mb-1">CONNECTION CHANGES</div>
-        <div id="statConnections" class="text-2xl font-bold text-white">-</div>
-        <div class="text-xs text-amber-400 mt-1">follow/unfollow</div>
       </div>
     </div>
 
@@ -180,13 +254,7 @@
 
     <div class="flex gap-2 mb-6 flex-wrap">
       <button onclick="switchTab('overview')" id="tab-overview"
-        class="tab-active px-4 py-2 rounded-lg text-sm font-medium transition">📊 Overview</button>
-      <button onclick="switchTab('posts')" id="tab-posts"
-        class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">📝 Posts</button>
-      <button onclick="switchTab('interactions')" id="tab-interactions"
-        class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">💬 Interactions</button>
-      <button onclick="switchTab('connections')" id="tab-connections"
-        class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">🔗 Connections</button>
+        class="tab-active px-4 py-2 rounded-lg text-sm font-medium transition">👾 Discord</button>
       <button onclick="switchTab('metrics')" id="tab-metrics"
         class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition">📈 Metrics</button>
       <button onclick="switchTab('heatmaps')" id="tab-heatmaps"
@@ -232,7 +300,7 @@
   </div>
 
   <script>
-    const API = 'https://kol-monitor-production.up.railway.app/api';
+    const API = 'http://127.0.0.1:3001/api';
 
     // --- Supabase Auth Integration ---
     const SUPABASE_URL = 'https://cxjeofxpfzdfqoppkosg.supabase.co';
@@ -240,6 +308,7 @@
 
     let supabaseClient = null;
     let currentSession = null;
+    let config_scrape_interval = null;
 
     // Load Supabase SDK and initialize
     async function initAuth() {
@@ -261,8 +330,17 @@
         if (!session) window.location.href = '/login.html';
       });
 
+      // Fetch global config
+      try {
+        const config = await fetchJson(`/api/config`);
+        if (config && config.scrape_interval) config_scrape_interval = config.scrape_interval;
+      } catch (e) {
+        console.warn("Could not fetch config interval", e);
+      }
+
       // Hide loading overlay and start dashboard
       document.getElementById('loginOverlay').classList.add('hidden');
+      pollScrapeStatus(); // Start polling first
       refreshAll();
     }
 
@@ -270,10 +348,37 @@
       return currentSession?.user?.id || null;
     }
 
+    // --- UI Helpers ---
+    function showNotification(message, type = 'info') {
+      const container = document.getElementById('notification-container');
+      const toast = document.createElement('div');
+      toast.className = `notification notification-${type}`;
+
+      let icon = 'info';
+      if (type === 'success') icon = 'check-circle';
+      if (type === 'error') icon = 'alert-triangle';
+      if (type === 'warning') icon = 'alert-circle';
+
+      toast.innerHTML = `
+        <i data-lucide="${icon}" class="w-4 h-4"></i>
+        <span>${message}</span>
+      `;
+
+      container.appendChild(toast);
+      lucide.createIcons();
+
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(100%)';
+        toast.style.transition = 'all 0.3s ease';
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    }
+
     // ---------- Data Fetchers ----------
     async function fetchJson(path, options = {}) {
-      if (!currentSession) {
-        window.location.href = '/login.html';
+      if (!currentSession || !currentSession.access_token) {
+        console.warn("No active session or access_token found.");
         return;
       }
 
@@ -288,66 +393,388 @@
       const headers = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${currentSession.access_token}`,
-        ...(options.headers || {}),
+        ...options.headers
       };
 
       try {
         const res = await fetch(url, { ...options, headers });
         if (!res.ok) {
-          const errorText = await res.text();
-          if (res.status === 401) {
-            alert(`Auth Error 401: ${errorText}. Please check the Supabase JWT Secret in the backend .env!`);
-          }
-          throw new Error(`API error: ${res.status} ${res.statusText} - ${errorText}`);
+          const text = await res.text();
+          console.error(`API Error [${res.status}] at ${url}:`, text);
+          throw new Error(`HTTP ${res.status}: ${text}`);
         }
         return await res.json();
-      } catch (e) {
-        console.error('FetchJSON error:', e);
-        throw e;
+      } catch (err) {
+        console.error(`fetchJson failed for ${url}:`, err);
+        throw err;
       }
     }
+    let lastScrapedCount = -1;
+    let scrapedKolNames = [];
+    let isScrapingFinished = false;
+
+    async function updateScrapeStatus() {
+      try {
+        const status = await fetchJson('/api/scrape_status');
+        if (!status) return;
+
+        const container = document.getElementById('scrapeProgressContainer');
+        const text = document.getElementById('scrapeProgressText');
+        const bar = document.getElementById('scrapeProgressBar');
+        const manualBtn = document.getElementById('manualScrapeBtn');
+
+        scrapedKolNames = status.scraped_names || [];
+
+        // Disable manual scrape button if scraping is in progress
+        if (manualBtn) {
+          if (status.is_scraping) {
+            manualBtn.disabled = true;
+            manualBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            manualBtn.title = "Scrape already in progress...";
+          } else {
+            manualBtn.disabled = false;
+            manualBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+            manualBtn.title = "";
+          }
+        }
+
+        if (container && text && bar) {
+          if (status.is_scraping) {
+            isScrapingFinished = false; // Reset for next completion
+            container.classList.remove('hidden');
+            bar.classList.remove('opacity-40');
+            text.innerHTML = `
+              <svg class="animate-spin -ml-1 mr-2 h-3 w-3 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              ${status.current_activity || 'Updating...'} (${status.scraped} / ${status.total} KOLs)`;
+            const pct = Math.round((status.scraped / status.total) * 100) || 5; // Min 5% for visual feedback
+            bar.style.width = `${pct}%`;
+
+            if (lastScrapedCount >= 0 && status.scraped !== lastScrapedCount) {
+              if (currentTab === 'heatmaps' || currentTab === 'engagement') loadTabContent(currentTab);
+            }
+          } else if (status.total > 0) {
+            // Idle State
+            isScrapingFinished = true;
+            container.classList.remove('hidden'); // Ensure visible
+            text.innerHTML = `
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-2 text-blue-400 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Monitor Idle - All ${status.total} KOLs up to date`;
+            bar.style.width = '100%';
+            bar.classList.add('opacity-40');
+          }
+        }
+
+        if (status.last_updated) {
+          const containerStatus = document.getElementById('statusContainer');
+          if (containerStatus) containerStatus.classList.remove('hidden');
+
+          const el = document.getElementById('lastUpdate');
+          if (el) {
+            el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-1.5 text-blue-400"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Last Web Scrape: ${new Date(status.last_updated).toLocaleTimeString()}`;
+          }
+
+          if (config_scrape_interval) {
+            syncDiscordCountdown(status.last_updated, config_scrape_interval, status.next_run_at);
+          }
+        }
+
+        lastScrapedCount = status.scraped;
+      } catch (e) {
+        console.error("Failed to fetch scrape status", e);
+      }
+    }
+
+    function pollScrapeStatus() {
+      updateScrapeStatus();
+      setInterval(updateScrapeStatus, 15000);
+    }
+
     async function refreshAll() {
-      await loadStats();
-      await loadTabContent(currentTab);
-      document.getElementById('lastUpdate').textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+      showNotification('Refreshing data...', 'info');
+      try {
+        await updateStats();
+        await loadTabContent(currentTab);
+        showNotification('Data refreshed', 'success');
+      } catch (e) {
+        showNotification('Error refreshing data: ' + e.message, 'error');
+      }
+    }
+
+    async function triggerManualScrape() {
+      if (!confirm('Trigger manual scrape now? This will run the full scraping cycle (46 KOLs).')) return;
+
+      const btn = document.getElementById('manualScrapeBtn');
+      const originalText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '⌛ Starting...';
+
+      try {
+        const res = await fetchJson(`/api/trigger_manual_scrape`, { method: 'POST' });
+        if (res) {
+          showNotification('🚀 Manual scrape triggered successfully!', 'success');
+        }
+      } catch (e) {
+        showNotification('❌ Failed to trigger scrape: ' + e.message, 'error');
+      } finally {
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.innerHTML = originalText;
+        }, 3000);
+      }
     }
 
     let currentTab = 'overview';
     let kolsData = [];
 
     // ---------- Tab Switching ----------
-    function switchTab(tab) {
-      currentTab = tab;
-      document.querySelectorAll('[id^="tab-"]').forEach(el => {
-        el.className = el.id === `tab-${tab}` ? 'tab-active px-4 py-2 rounded-lg text-sm font-medium transition' : 'tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition';
+    function switchTab(tabId) {
+      currentTab = tabId;
+      document.querySelectorAll('.tab-active').forEach(el => {
+        el.className = 'tab-inactive px-4 py-2 rounded-lg text-sm font-medium transition';
       });
-      loadTabContent(tab);
+      const activeEl = document.getElementById(`tab-${tabId}`);
+      if (activeEl) {
+        activeEl.className = 'tab-active px-4 py-2 rounded-lg text-sm font-medium transition';
+      }
+      loadTabContent(tabId);
     }
 
-    async function loadTabContent(tab) {
-      const content = document.getElementById('content');
-      content.innerHTML = '<div class="text-center py-12 text-slate-500 pulse">Loading...</div>';
+    let cachedOverviewFeed = null;
+    try {
+      const stored = localStorage.getItem('kol_monitor_discord_feed');
+      if (stored) cachedOverviewFeed = JSON.parse(stored);
+    } catch (e) {
+      console.warn("Could not read feed cache:", e);
+    }
+    let isFetchingOverview = false;
 
-      switch (tab) {
-        case 'overview': await renderOverview(content); break;
-        case 'posts': await renderPosts(content); break;
-        case 'interactions': await renderInteractions(content); break;
-        case 'connections': await renderConnections(content); break;
-        case 'metrics': await renderMetrics(content); break;
-        case 'engagement': await renderEngagementTracker(content); break;
-        case 'dms': await renderDms(content); break;
-        case 'settings': await renderSettings(content); break;
-        case 'heatmaps': await renderHeatmaps(content); break;
+    async function loadTabContent(tabId) {
+      const content = document.getElementById('content');
+
+      // Only show spinner if not overview, or if overview has no cache
+      if (tabId !== 'overview' || !cachedOverviewFeed) {
+        content.innerHTML = '<div class="flex justify-center py-12"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div></div>';
+      }
+
+      try {
+        switch (tabId) {
+          case 'overview': await renderDashboardFeed(content); break;
+          case 'kols': await renderOverview(content); break;
+          case 'posts': await renderPosts(content); break;
+          case 'interactions': await renderInteractions(content); break;
+          case 'connections': await renderConnections(content); break;
+          case 'metrics': await renderMetrics(content); break;
+          case 'heatmaps': await renderHeatmaps(content); break;
+          case 'engagement': await renderEngagementTracker(content); break;
+          case 'settings': await renderSettings(content); break;
+          case 'dms': await renderScheduledDMs(content); break;
+        }
+      } catch (e) {
+        content.innerHTML = `<div class="text-center py-12">
+          <p class="text-red-400 font-medium mb-2">Error loading dashboard content</p>
+          <p class="text-xs text-slate-500">${e.message}</p>
+          <button onclick="refreshAll()" class="mt-4 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded border border-slate-700">Retry Refresh</button>
+        </div>`;
+        console.error(e);
       }
     }
 
+    async function renderDashboardFeed(el) {
+      const initHistory = () => {
+        const date = document.getElementById('postsHistoryDate')?.value;
+        const sort = document.getElementById('postsHistorySort')?.value || 'recent';
+        if (date) loadDiscordPostsHistory(date, sort);
+      };
+
+      if (cachedOverviewFeed) {
+        // Render instantly from cache
+        if (currentTab === 'overview') {
+          el.innerHTML = buildOverviewHTML(cachedOverviewFeed);
+          lucide.createIcons();
+          initHistory();
+        }
+        // Silently fetch updates in background
+        if (!isFetchingOverview) {
+          isFetchingOverview = true;
+          fetchJson(`/api/overview_feed`).then(data => {
+            cachedOverviewFeed = data;
+            try { localStorage.setItem('kol_monitor_discord_feed', JSON.stringify(data)); } catch (e) { }
+            if (currentTab === 'overview') {
+              el.innerHTML = buildOverviewHTML(data);
+              lucide.createIcons();
+              initHistory();
+            }
+          }).catch(console.error).finally(() => isFetchingOverview = false);
+        }
+      } else {
+        // First load, block and let loadTabContent handle spinner/errors
+        if (isFetchingOverview) return;
+        isFetchingOverview = true;
+        try {
+          const data = await fetchJson(`/api/overview_feed`);
+          cachedOverviewFeed = data;
+          try { localStorage.setItem('kol_monitor_discord_feed', JSON.stringify(data)); } catch (e) { }
+          if (currentTab === 'overview') {
+            el.innerHTML = buildOverviewHTML(data);
+            lucide.createIcons();
+            initHistory();
+          }
+        } finally {
+          isFetchingOverview = false;
+        }
+      }
+    }
+
+    async function changeDiscordHistory() {
+      const date = document.getElementById('postsHistoryDate').value;
+      const sort = document.getElementById('postsHistorySort').value;
+      await loadDiscordPostsHistory(date, sort);
+    }
+
+    async function loadDiscordPostsHistory(date, sort) {
+      const listEl = document.getElementById('discordPostsHistory');
+      if (!listEl) return;
+
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      try {
+        const posts = await fetchJson(`/api/discord_posts_history?date=${date}&sort=${sort}&tz=${tz}`);
+        if (!posts || posts.length === 0) {
+          listEl.innerHTML = '<p class="text-xs text-slate-500 italic p-4 text-center">No posts found for this day.</p>';
+          return;
+        }
+
+        const safeLoc = (val) => val != null ? val.toLocaleString() : '0';
+        listEl.innerHTML = posts.map(p => {
+          const postedAt = new Date(p.posted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const scrapedAt = new Date(p.captured_at || p.first_captured_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+          return `
+            <div class="bg-slate-900/40 p-3 rounded-lg border border-slate-800/60 hover:border-blue-500/30 transition-all">
+              <div class="flex justify-between items-center mb-2">
+                <span class="text-blue-400 font-bold text-sm">${p.kol || 'KOL'}</span>
+                <div class="flex flex-col text-right">
+                  <span class="text-[9px] text-slate-500 uppercase tracking-tighter">Posted at: ${postedAt}</span>
+                  <span class="text-[9px] text-slate-400 uppercase tracking-tighter font-semibold">Scraped at: ${scrapedAt}</span>
+                </div>
+              </div>
+              <p class="text-sm text-slate-300 italic mb-3">"${truncate(p.content || '', 200)}"</p>
+              <div class="flex justify-between items-center">
+                <div class="flex gap-3 text-[10px] font-mono text-slate-500">
+                  <span title="Views">👀 ${safeLoc(p.views)}</span>
+                  <span title="Likes">👍 ${safeLoc(p.likes)}</span>
+                  <span title="Reposts">🔄 ${safeLoc(p.reposts)}</span>
+                  <span title="Replies">💬 ${safeLoc(p.comments)}</span>
+                </div>
+                <a href="${p.post_url || '#'}" target="_blank" class="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-400 px-2 py-1 rounded transition-colors flex items-center gap-1">
+                  View <i data-lucide="external-link" class="w-3 h-3"></i>
+                </a>
+              </div>
+            </div>
+          `;
+        }).join('');
+        lucide.createIcons();
+      } catch (e) {
+        console.error("Failed to load discord posts history", e);
+        listEl.innerHTML = '<p class="text-xs text-red-500 text-center p-4">Error loading history.</p>';
+      }
+    }
+
+    function buildOverviewHTML(data) {
+      const safeLoc = (val) => val != null ? val.toLocaleString() : '0';
+      const todayString = new Date().toISOString().split('T')[0];
+
+      return `
+    <div class="space-y-6">
+      <!-- 1. Recent Posts -->
+      <div class="card p-5 border-t-2 border-t-blue-500">
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-3">
+          <h3 class="font-bold text-lg text-white flex items-center">
+            <i data-lucide="message-square" class="w-5 h-5 mr-2 text-blue-400"></i> New X Posts
+          </h3>
+          <div class="flex items-center gap-2">
+            <input type="date" id="postsHistoryDate" value="${todayString}" 
+              onchange="changeDiscordHistory()"
+              class="bg-slate-800 border border-slate-700 text-xs text-white rounded px-2 py-1 focus:border-blue-500 outline-none">
+            <select id="postsHistorySort" onchange="changeDiscordHistory()"
+              class="bg-slate-800 border border-slate-700 text-xs text-white rounded px-2 py-1 focus:border-blue-500 outline-none">
+              <option value="recent">Recent First</option>
+              <option value="oldest">Oldest First</option>
+            </select>
+          </div>
+        </div>
+        <div id="discordPostsHistory" class="space-y-3 max-h-[600px] overflow-y-auto scrollbar-thin pr-2">
+          <p class="text-xs text-slate-500 animate-pulse">Loading history...</p>
+        </div>
+      </div>
+
+      <!-- 2. Heatmap Changes -->
+  <div class="card p-5 border-t-2 border-t-orange-500">
+    <h3 class="font-bold text-lg mb-4 text-white flex items-center"><i data-lucide="flame" class="w-5 h-5 mr-2 text-orange-400"></i> Hot Posts (Heatmap)</h3>
+    <div class="space-y-3 max-h-[400px] overflow-y-auto scrollbar-thin pr-2">
+      ${(data.hot_posts || []).length === 0 ? '<p class="text-xs text-slate-500 italic">No significant engagement surges in the last sync.</p>' :
+          data.hot_posts.map(h => `
+          <div class="bg-slate-900/50 p-3 rounded-lg border border-slate-800">
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-orange-400 font-bold text-sm">🔥 ${h.kol || 'KOL'}</span>
+              <span class="text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded uppercase font-bold text-center tracking-wider">+${h.score || 0} Score</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-2 font-medium">"${truncate(h.content || '', 120)}"</p>
+            <div class="flex flex-wrap gap-2 text-[10px] font-bold">
+              ${(h.d_views || 0) > 0 ? `<span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">+${safeLoc(h.d_views)} views</span>` : ''}
+              ${(h.d_likes || 0) > 0 ? `<span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">+${safeLoc(h.d_likes)} likes</span>` : ''}
+              ${(h.d_reposts || 0) > 0 ? `<span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">+${safeLoc(h.d_reposts)} reposts</span>` : ''}
+              ${(h.d_comments || 0) > 0 ? `<span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">+${safeLoc(h.d_comments)} replies</span>` : ''}
+            </div>
+          </div>
+        `).join('')}
+    </div>
+  </div>
+
+  <!-- 3. Interaction Changes -->
+  <div class="card p-5 border-t-2 border-t-purple-500">
+    <h3 class="font-bold text-lg mb-4 text-white flex items-center"><i data-lucide="zap" class="w-5 h-5 mr-2 text-purple-400"></i> Post Interactions</h3>
+    <div class="space-y-3 max-h-[400px] overflow-y-auto scrollbar-thin pr-2">
+      ${(data.interactions || []).length === 0 ? '<p class="text-xs text-slate-500 italic">No significant interaction changes in the last sync.</p>' :
+          data.interactions.map(i => {
+            const totalDelta = (i.d_likes || 0) + (i.d_reposts || 0) + (i.d_comments || 0);
+            return `
+          <div class="bg-slate-900/50 p-3 rounded-lg border border-slate-800">
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-purple-400 font-bold text-sm">⚡ ${i.kol || 'KOL'}</span>
+              <span class="text-[10px] bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">+${totalDelta} changes</span>
+            </div>
+             <p class="text-xs text-slate-400 mb-2 font-medium">"${truncate(i.content || '', 100)}"</p>
+            <div class="flex flex-wrap gap-2 text-[10px] font-bold">
+              ${(i.d_likes || 0) > 0 ? `<span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">+${safeLoc(i.d_likes)} likes</span>` : ''}
+              ${(i.d_reposts || 0) > 0 ? `<span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">+${safeLoc(i.d_reposts)} reposts</span>` : ''}
+              ${(i.d_comments || 0) > 0 ? `<span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">+${safeLoc(i.d_comments)} replies</span>` : ''}
+            </div>
+            ${(i.repliers && i.repliers.length > 0) ? `
+              <div class="mt-2 pt-2 border-t border-slate-800/50 flex items-center gap-1.5 overflow-x-auto">
+                <span class="text-[9px] text-slate-500 uppercase font-bold shrink-0">Recent:</span>
+                ${i.repliers.map(rep => `<span class="text-[9px] text-purple-300 bg-purple-900/30 px-1.5 py-0.5 rounded">@${rep}</span>`).join('')}
+              </div>
+            ` : ''}
+          </div>
+        `}).join('')}
+    </div>
+  </div>
+
+</div>
+
+    </div>
+  `;
+    }
 
     async function renderHeatmaps(el) {
       el.innerHTML = `
       <div class="card p-6 card-glow">
-        <div class="flex items-center justify-between mb-6">
           <h2 class="text-xl font-bold flex items-center text-white"><i data-lucide="bar-chart-2" class="mr-2 text-blue-400"></i> Historical X KOL Posts (Bubble Heatmap)</h2>
-          <button onclick="switchTab('heatmaps')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow-sm text-sm transition">Refresh Data</button>
         </div>
         <div class="text-sm text-slate-400 mb-6">
           <p><strong>X-Axis:</strong> Timeline (Published Date) &nbsp;|&nbsp; <strong>Y-Axis:</strong> Views &nbsp;|&nbsp; <strong>Bubble Size:</strong> Engagement Rate ((Replies+Reposts+Likes+Bookmarks)/Views) &nbsp;|&nbsp; <strong>Bubble Color:</strong> Reposts + Bookmarks (darker/redder = higher value)</p>
@@ -471,13 +898,13 @@
                 },
                 zoom: {
                   pan: {
-                    enabled: true,
+                    enabled: false,
                     mode: 'x',
                   },
                   zoom: {
-                    wheel: { enabled: true },
-                    drag: { enabled: true },
-                    pinch: { enabled: true },
+                    wheel: { enabled: false },
+                    drag: { enabled: false },
+                    pinch: { enabled: false },
                     mode: 'x',
                   }
                 }
@@ -522,13 +949,10 @@
       }
     }
 
-    async function loadStats() {
-      const stats = await fetchJson(`${API}/stats`);
-      document.getElementById('statKols').textContent = stats.total_kols;
-      document.getElementById('statPosts').textContent = stats.posts_today;
-      document.getElementById('statInteractions').textContent = stats.interactions_today;
-      document.getElementById('statConnections').textContent = stats.connection_changes_today;
-      document.getElementById('statTotalPosts').textContent = `total: ${stats.total_posts}`;
+    async function updateStats() {
+      const stats = await fetchJson(`/api/stats`);
+      const statKols = document.getElementById('statKols');
+      if (statKols) statKols.textContent = stats.total_kols;
     }
 
     // ---------- Renderers ----------
@@ -549,42 +973,36 @@
     }
 
     let discordIntervalId = null;
-    function startDiscordCountdown(mins) {
+    function syncDiscordCountdown(lastUpdatedIso, intervalMins, nextRunIso) {
       if (discordIntervalId) clearInterval(discordIntervalId);
-      const intervalMs = mins * 60 * 1000;
 
-      // Load or initialize persistent next push time
-      let nextPushTime = parseInt(localStorage.getItem('nextPushTime'));
-      const now = Date.now();
-
-      // If never set or in the deep past (stale), initialize it
-      if (!nextPushTime || (now - nextPushTime) > intervalMs) {
-        nextPushTime = now + intervalMs;
-        localStorage.setItem('nextPushTime', nextPushTime);
-      } else if (nextPushTime < now) {
-        // If it passed while page was closed, cycle it forward
-        while (nextPushTime < now) {
-          nextPushTime += intervalMs;
-        }
-        localStorage.setItem('nextPushTime', nextPushTime);
-      }
+      const intervalMs = intervalMins * 60 * 1000;
+      const lastScrapeTime = new Date(lastUpdatedIso).getTime();
 
       const updateDisplay = () => {
         const now = Date.now();
-        let remaining = nextPushTime - now;
+        let remainingMs = 0;
 
-        if (remaining <= 0) {
-          nextPushTime = Date.now() + intervalMs;
-          localStorage.setItem('nextPushTime', nextPushTime);
-          remaining = intervalMs;
+        if (nextRunIso) {
+          // Use the EXACT time from the scheduler
+          const nextRunTime = new Date(nextRunIso).getTime();
+          remainingMs = Math.max(0, nextRunTime - now);
+        } else {
+          // Fallback to estimation based on last scrape
+          let timeSinceScrape = Math.max(0, now - lastScrapeTime);
+          remainingMs = intervalMs - (timeSinceScrape % intervalMs);
         }
 
-        const el = document.getElementById('discordTimerDisplay');
-        if (el) {
-          const totalSecs = Math.max(0, Math.floor(remaining / 1000));
-          const m = Math.floor(totalSecs / 60);
-          const s = totalSecs % 60;
-          el.innerText = `${m}:${s.toString().padStart(2, '0')}`;
+        let remainingSeconds = Math.floor(remainingMs / 1000);
+
+        const el = document.getElementById('headerTimerDisplay');
+        const el2 = document.getElementById('discordTimerDisplay');
+        if (el || el2) {
+          const m = Math.floor(remainingSeconds / 60);
+          const s = remainingSeconds % 60;
+          const timeStr = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+          if (el) el.innerText = timeStr;
+          if (el2) el2.innerText = timeStr;
         }
       };
 
@@ -604,7 +1022,7 @@
     }
 
     async function renderEngagementTracker(el) {
-      const data = await fetchJson(`${API}/twitter_posts?days=90&limit=5000`);
+      const data = await fetchJson(`/api/twitter_posts?days=90&limit=5000`);
 
       // Group by KOL
       const byKol = {};
@@ -628,9 +1046,6 @@
           <h2 class="text-xl font-bold text-white flex items-center gap-2">
             <span class="text-xl">⚡</span> Engagement Tracker
           </h2>
-          <button onclick="switchTab('engagement')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2">
-            <i data-lucide="refresh-cw" class="w-3 h-3"></i> Sync Data
-          </button>
       </div>
 
       <div id="engagementList" class="space-y-4">
@@ -794,7 +1209,7 @@
     `;
 
       try {
-        const endpoint = type === 'reposts' ? `${API}/post_reposts?post_id=${postId}` : `${API}/post_replies?post_id=${postId}`;
+        const endpoint = type === 'reposts' ? `/api/post_reposts?post_id=${postId}` : `/api/post_replies?post_id=${postId}`;
         const data = await fetchJson(endpoint);
         const list = type === 'reposts' ? data.reposts : data.replies;
 
@@ -833,7 +1248,7 @@
     }
 
     async function renderOverview(el) {
-      const data = await fetchJson(`${API}/kols`);
+      const data = await fetchJson(`/api/kols`);
       kolsData = data.kols;
 
       el.innerHTML = `
@@ -885,7 +1300,7 @@
     }
 
     async function renderPosts(el) {
-      const data = await fetchJson(`${API}/posts?days=7&limit=50`);
+      const data = await fetchJson(`/api/posts?days=7&limit=50`);
       el.innerHTML = `
     <h2 class="text-lg font-semibold text-white mb-4">Recent Posts (${data.posts.length})</h2>
     <div class="space-y-3">
@@ -909,7 +1324,7 @@
     }
 
     async function renderInteractions(el) {
-      const data = await fetchJson(`${API}/interactions?days=7&limit=50`);
+      const data = await fetchJson(`/api/interactions?days=7&limit=50`);
       el.innerHTML = `
     <h2 class="text-lg font-semibold text-white mb-4">Recent Interactions (${data.interactions.length})</h2>
     <div class="space-y-3">
@@ -931,7 +1346,7 @@
     }
 
     async function renderConnections(el) {
-      const data = await fetchJson(`${API}/connections?days=7&limit=100`);
+      const data = await fetchJson(`/api/connections?days=7&limit=100`);
       el.innerHTML = `
     <h2 class="text-lg font-semibold text-white mb-4">Connection Changes (${data.connections.length})</h2>
     <div class="space-y-2">
@@ -952,7 +1367,7 @@
     }
 
     async function renderMetrics(el) {
-      const data = await fetchJson(`${API}/metrics?days=30`);
+      const data = await fetchJson(`/api/metrics?days=30`);
 
       // Group by KOL
       const byKol = {};
@@ -992,9 +1407,9 @@
     }
 
     async function renderSettings(el) {
-      const profile = await fetchJson(`${API}/settings`);
-      const config = await fetchJson(`${API}/config`);
-      const kolsResponse = await fetchJson(`${API}/kols`);
+      const profile = await fetchJson(`/api/settings`);
+      const config = await fetchJson(`/api/config`);
+      const kolsResponse = await fetchJson(`/api/kols`);
       const kols = kolsResponse.kols || kolsResponse || [];
 
       // Only start timer if all 3 conditions met: 1+ webhook, 1+ KOL, and X cookies saved
@@ -1003,15 +1418,6 @@
         profile.discord_webhook_followers;
       const hasKols = kols.length > 0;
       const hasCookies = profile.twitter_auth_token && profile.twitter_ct0;
-
-      if (hasWebhook && hasKols && hasCookies && config && config.scrape_interval) {
-        startDiscordCountdown(config.scrape_interval);
-      } else {
-        if (discordIntervalId) {
-          clearInterval(discordIntervalId);
-          discordIntervalId = null;
-        }
-      }
 
       el.innerHTML = `
     <h2 class="text-xl font-bold text-white mb-6">⚙️ SaaS System Settings</h2>
@@ -1185,9 +1591,9 @@
 
     // ---------- Scheduled DMs Actions ----------
     async function renderDms(el) {
-      const kolsResponse = await fetchJson(`${API}/kols`);
+      const kolsResponse = await fetchJson(`/api/kols`);
       const kols = kolsResponse.kols || kolsResponse || [];
-      const logsResponse = await fetchJson(`${API}/dm_logs?user_id=${getUserId()}`);
+      const logsResponse = await fetchJson(`/api/dm_logs?user_id=${getUserId()}`);
       const logs = logsResponse.logs || [];
 
       const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -1315,7 +1721,7 @@
 
       try {
         for (const data of payload) {
-          await fetchJson(`${API}/kols/${data.id}`, {
+          await fetchJson(`/api/kols/${data.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1342,7 +1748,7 @@
       if (!auth || !ct0) { alert("Please enter both tokens."); return; }
 
       try {
-        const res = await fetchJson(`${API}/settings/cookies`, {
+        const res = await fetchJson(`/api/settings/cookies`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ auth_token: auth, ct0: ct0 })
@@ -1364,7 +1770,7 @@
       };
 
       try {
-        const res = await fetchJson(`${API}/settings/webhooks`, {
+        const res = await fetchJson(`/api/settings/webhooks`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(data)
@@ -1380,7 +1786,7 @@
       btn.classList.add('opacity-50', 'cursor-not-allowed');
 
       try {
-        const res = await fetchJson(`${API}/discord/push`, {
+        const res = await fetchJson(`/api/discord/push`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ channel })
@@ -1420,7 +1826,7 @@
       btn.disabled = true;
 
       try {
-        await fetchJson(`${API}/kols`, {
+        await fetchJson(`/api/kols`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
@@ -1438,7 +1844,7 @@
 
     async function deleteKol(id) {
       if (!confirm('Remove this KOL from monitoring?')) return;
-      await fetchJson(`${API}/kols/${id}`, { method: 'DELETE' });
+      await fetchJson(`/api/kols/${id}`, { method: 'DELETE' });
       renderSettings(document.getElementById('content'));
     }
 
@@ -1446,7 +1852,7 @@
       if (!confirm('DANGER: This will delete ALL your tracked KOLs and their historical data. Are you sure?')) return;
 
       try {
-        await fetchJson(`${API}/kols/all`, { method: 'DELETE' });
+        await fetchJson(`/api/kols/all`, { method: 'DELETE' });
         alert("All KOLs have been removed.");
         renderSettings(document.getElementById('content'));
       } catch (e) { alert("Error removing all KOLs."); }
@@ -1456,7 +1862,7 @@
       if (!confirm('DANGER: This will delete ALL your tracked KOLs and their historical data. Are you sure?')) return;
 
       try {
-        await fetchJson(`${API}/kols/all`, { method: 'DELETE' });
+        await fetchJson(`/api/kols/all`, { method: 'DELETE' });
         alert("All KOLs have been removed.");
         renderOverview(document.getElementById('content'));
       } catch (e) { alert("Error removing all KOLs."); }
@@ -1490,7 +1896,7 @@
 
         btn.innerText = `Importing ${imported + 1} / ${validLines.length}...`;
 
-        await fetchJson(`${API}/kols`, {
+        await fetchJson(`/api/kols`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
@@ -1519,6 +1925,12 @@
     (async () => {
       // Initialize Supabase auth, then load dashboard
       initAuth();
+
+      // Show manual scrape button only on localhost
+      if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+        const btn = document.getElementById('manualScrapeBtn');
+        if (btn) btn.classList.remove('hidden');
+      }
     })();
   </script>
 

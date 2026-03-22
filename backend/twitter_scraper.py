@@ -20,6 +20,23 @@ def get_kols(db):
     cur.execute("SELECT id, name, twitter_url FROM kols WHERE status='active' AND twitter_url IS NOT NULL ORDER BY id")
     return cur.fetchall()
 
+def update_scrape_status(db, message):
+    """Update the current activity in the system_status table."""
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT value FROM system_status WHERE key = 'twitter_scraper_status'")
+        row = cur.fetchone()
+        status = row[0] if row else {}
+        status['current_activity'] = message
+        cur.execute("""
+            INSERT INTO system_status (key, value, updated_at)
+            VALUES ('twitter_scraper_status', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, (json.dumps(status),))
+        db.commit()
+    except Exception as e:
+        print(f"⚠️ Failed to update activity status: {e}")
+
 def get_twitter_username(url):
     match = re.search(r'x\.com/(\w+)', url)
     return match.group(1) if match else None
@@ -100,26 +117,28 @@ async def scrape_post_interactions(page, db, twitter_post_id, tweet_url, interac
         print(f"  ⚠️ Error scraping {interaction_type}: {e}")
         db.rollback()
 
-async def scrape_profile(page, kol_id, name, url, db):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scraping X: {name} - {url}")
+async def scrape_profile(page, kol_id, name, url, db, sync_time):
+    msg = f"Scraping X: {name} (@{get_twitter_username(url)})"
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+    update_scrape_status(db, msg)
     
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
         
         # Wait for the main react element to render or timeout
         try:
-            await page.wait_for_selector('div[data-testid="primaryColumn"]', timeout=15000)
+            await page.wait_for_selector('div[data-testid="primaryColumn"]', timeout=8000)
         except Exception:
             print(f"  ⚠️ Timeout waiting for primaryColumn, trying reload...")
-            await page.reload(wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_selector('div[data-testid="primaryColumn"]', timeout=15000)
+            await page.reload(wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_selector('div[data-testid="primaryColumn"]', timeout=8000)
 
         await page.wait_for_timeout(SLOW_MO)
         
-        # Keep scrolling a bit to load the tweets (sometimes they are lazy loaded or we need to skip pinned tweets)
-        for _ in range(3):
+        # Quick scroll to load lazy tweets
+        for _ in range(2):
             await page.evaluate("window.scrollBy(0, 1000)")
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(500)
         
         # --- Scrape Profile Metrics ---
         metrics = {}
@@ -141,9 +160,9 @@ async def scrape_profile(page, kol_id, name, url, db):
         cur = db.cursor()
         if metrics:
             cur.execute("""
-                INSERT INTO kol_metrics (kol_id, platform, followers_count, following_count)
-                VALUES (%s, 'twitter', %s, %s)
-            """, (kol_id, metrics.get('followers'), metrics.get('following')))
+                INSERT INTO kol_metrics (kol_id, platform, followers_count, following_count, captured_at)
+                VALUES (%s, 'twitter', %s, %s, %s)
+            """, (kol_id, metrics.get('followers'), metrics.get('following'), sync_time))
             print(f"  📊 Metrics: Followers: {metrics.get('followers')}, Following: {metrics.get('following')}")
 
         # --- Scrape Recent Tweets ---
@@ -192,22 +211,26 @@ async def scrape_profile(page, kol_id, name, url, db):
                         views = await views_el.get_attribute('aria-label') or '0'
 
                 cur.execute("""
-                    INSERT INTO twitter_posts (kol_id, post_id, content, likes, reposts, comments, bookmarks, views, post_url, posted_at, captured_at, last_likes, last_reposts, last_comments, last_bookmarks, last_views)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s)
+                    INSERT INTO twitter_posts (
+                        kol_id, post_id, content, likes, reposts, comments, bookmarks, views, post_url, posted_at, 
+                        first_captured_at, captured_at, 
+                        last_likes, last_reposts, last_comments, last_bookmarks, last_views
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (post_id) DO UPDATE SET 
-                        last_likes = twitter_posts.likes, 
-                        last_reposts = twitter_posts.reposts, 
-                        last_comments = twitter_posts.comments, 
-                        last_bookmarks = twitter_posts.bookmarks, 
-                        last_views = twitter_posts.views,
+                        last_likes = CASE WHEN EXCLUDED.likes != twitter_posts.likes THEN twitter_posts.likes ELSE twitter_posts.last_likes END, 
+                        last_reposts = CASE WHEN EXCLUDED.reposts != twitter_posts.reposts THEN twitter_posts.reposts ELSE twitter_posts.last_reposts END, 
+                        last_comments = CASE WHEN EXCLUDED.comments != twitter_posts.comments THEN twitter_posts.comments ELSE twitter_posts.last_comments END, 
+                        last_bookmarks = CASE WHEN EXCLUDED.bookmarks != twitter_posts.bookmarks THEN twitter_posts.bookmarks ELSE twitter_posts.last_bookmarks END, 
+                        last_views = CASE WHEN EXCLUDED.views != twitter_posts.views THEN twitter_posts.views ELSE twitter_posts.last_views END,
                         likes = EXCLUDED.likes, 
                         reposts = EXCLUDED.reposts, 
                         comments = EXCLUDED.comments, 
                         bookmarks = EXCLUDED.bookmarks, 
                         views = EXCLUDED.views, 
-                        captured_at = NOW()
+                        captured_at = EXCLUDED.captured_at
                     RETURNING id
-                """, (kol_id, f"tw_{tweet_id}", tweet_text, parse_count(likes), parse_count(reposts), parse_count(replies), parse_count(bookmarks), parse_count(views), tweet_url, posted_at, parse_count(likes), parse_count(reposts), parse_count(replies), parse_count(bookmarks), parse_count(views)))
+                """, (kol_id, f"tw_{tweet_id}", tweet_text, parse_count(likes), parse_count(reposts), parse_count(replies), parse_count(bookmarks), parse_count(views), tweet_url, posted_at, sync_time, sync_time, parse_count(likes), parse_count(reposts), parse_count(replies), parse_count(bookmarks), parse_count(views)))
                 
                 db_post_id = cur.fetchone()[0]
                 processed_tweets.append({'db_id': db_post_id, 'url': tweet_url, 'replies': parse_count(replies), 'reposts': parse_count(reposts)})
@@ -219,13 +242,18 @@ async def scrape_profile(page, kol_id, name, url, db):
         db.commit()
         print(f"  ✅ Scraped {tweet_count} tweets for @{get_twitter_username(url)}")
         
-        # Now scrape detailed interactions if they are high
-        for pt in processed_tweets:
-            if pt['replies'] > 15:
-                await scrape_post_interactions(page, db, pt['db_id'], pt['url'], "replies")
-            if pt['reposts'] > 15:
-                await scrape_post_interactions(page, db, pt['db_id'], pt['url'], "reposts")
+        # Interaction scraping disabled for speed — each one adds a full page load
+        # Uncomment to re-enable for detailed reply/repost usernames:
+        # for pt in processed_tweets:
+        #     if pt['replies'] > 15:
+        #         await scrape_post_interactions(page, db, pt['db_id'], pt['url'], "replies")
+        #     if pt['reposts'] > 15:
+        #         await scrape_post_interactions(page, db, pt['db_id'], pt['url'], "reposts")
         
+        # Mark KOL as updated today
+        cur.execute("UPDATE kols SET updated_at = %s WHERE id = %s", (sync_time, kol_id))
+        db.commit()
+
         return True
 
     except Exception as e:
@@ -235,6 +263,7 @@ async def scrape_profile(page, kol_id, name, url, db):
 
 async def main():
     db = get_db()
+    sync_time = datetime.now(timezone.utc)
     try:
         # Scrape by User isolation
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -270,9 +299,11 @@ async def main():
                     
                     if "login" in page.url:
                         print(f"❌ User {user_id}: Twitter/X login failed with cookies!")
+                        update_scrape_status(db, f"❌ Login failed for user {user_id}")
                         await context.close()
                         continue
                     print(f"✅ User {user_id}: Twitter/X login successful!")
+                    update_scrape_status(db, f"✅ Session active for user {user_id}")
 
                     # Filter KOLs by this user
                     cur2 = db.cursor()
@@ -280,13 +311,26 @@ async def main():
                     kols = cur2.fetchall()
                     
                     for kol_id, name, url in kols:
-                        await scrape_profile(page, kol_id, name, url, db)
-                        await asyncio.sleep(SLOW_MO / 1000)
+                        try:
+                            await asyncio.wait_for(
+                                scrape_profile(page, kol_id, name, url, db, sync_time),
+                                timeout=60
+                            )
+                        except asyncio.TimeoutError:
+                            print(f"  ⏰ Timeout scraping {name} (60s), skipping...")
+                            cur2.execute("UPDATE kols SET updated_at = %s WHERE id = %s", (sync_time, kol_id))
+                            db.commit()
+                        except Exception as e:
+                            print(f"  ❌ Error scraping {name}: {e}")
+                            cur2.execute("UPDATE kols SET updated_at = %s WHERE id = %s", (sync_time, kol_id))
+                            db.commit()
+                        await asyncio.sleep(0.5)
                 except Exception as e:
-                    print(f"❌ User {user_id}: Critical scrape error: {e}")
+                    print(f"❌ User {user_id}: Critical session error: {e}")
                 
                 await context.close()
                 
+            update_scrape_status(db, "🏁 Scrape cycle complete.")
         await browser.close()
     finally:
         release_db(db)

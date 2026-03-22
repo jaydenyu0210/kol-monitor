@@ -5,7 +5,9 @@
 
 import { getSession } from './auth.js';
 
-const RAILWAY_API = 'https://kol-monitor-production.up.railway.app';
+const RAILWAY_API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:3001'
+    : 'https://kol-monitor-production.up.railway.app';
 
 /**
  * Authenticated fetch wrapper.
