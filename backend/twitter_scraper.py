@@ -7,7 +7,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import psycopg2
 import psycopg2.extras
@@ -20,19 +20,32 @@ def get_kols(db):
     cur.execute("SELECT id, name, twitter_url FROM kols WHERE status='active' AND twitter_url IS NOT NULL ORDER BY id")
     return cur.fetchall()
 
-def update_scrape_status(db, message):
-    """Update the current activity in the system_status table."""
+def update_scrape_status(db, message, user_id=None):
+    """Update the current activity in the system_status table, partitioned by user if provided."""
     try:
         cur = db.cursor()
-        cur.execute("SELECT value FROM system_status WHERE key = 'twitter_scraper_status'")
+        key = 'twitter_scraper_status'
+        if user_id:
+            key = f'twitter_scraper_status_{user_id}'
+            
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (key,))
         row = cur.fetchone()
         status = row[0] if row else {}
+        
         status['current_activity'] = message
+        
+        # Maintain a log history (last 50 lines) to help isolated user debugging
+        logs = status.get('logs', [])
+        # Only add if the message is new or significant (avoid duplicates of 'Idle')
+        if not logs or logs[-1] != f"[{datetime.now().strftime('%H:%M:%S')}] {message}":
+            logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+            status['logs'] = logs[-50:] # Keep last 50 entries
+        
         cur.execute("""
             INSERT INTO system_status (key, value, updated_at)
-            VALUES ('twitter_scraper_status', %s, NOW())
+            VALUES (%s, %s, NOW())
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-        """, (json.dumps(status),))
+        """, (key, json.dumps(status)))
         db.commit()
     except Exception as e:
         print(f"⚠️ Failed to update activity status: {e}")
@@ -117,10 +130,10 @@ async def scrape_post_interactions(page, db, twitter_post_id, tweet_url, interac
         print(f"  ⚠️ Error scraping {interaction_type}: {e}")
         db.rollback()
 
-async def scrape_profile(page, kol_id, name, url, db, sync_time):
-    msg = f"Scraping X: {name} (@{get_twitter_username(url)})"
+async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
+    msg = f"Scraping {name} (@{get_twitter_username(url)})"
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-    update_scrape_status(db, msg)
+    update_scrape_status(db, msg, user_id=user_id)
     
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -129,16 +142,45 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time):
         try:
             await page.wait_for_selector('div[data-testid="primaryColumn"]', timeout=8000)
         except Exception:
-            print(f"  ⚠️ Timeout waiting for primaryColumn, trying reload...")
-            await page.reload(wait_until="domcontentloaded", timeout=15000)
-            await page.wait_for_selector('div[data-testid="primaryColumn"]', timeout=8000)
+            current_url = page.url
+            if "login" in current_url.lower():
+                print(f"  ❌ SESSION EXPIRED: Redirected to login page. Skipping profile.")
+                return False
+            
+            content = await page.content()
+            if "rate limit" in content.lower() or "something went wrong" in content.lower():
+                print(f"  ⚠️ RATE LIMITED: Twitter is blocking requests. Sleeping for a while...")
+                await asyncio.sleep(30)
+                return False
 
-        await page.wait_for_timeout(SLOW_MO)
-        
-        # Quick scroll to load lazy tweets
-        for _ in range(2):
-            await page.evaluate("window.scrollBy(0, 1000)")
-            await page.wait_for_timeout(500)
+            print(f"  ⚠️ Timeout waiting for primaryColumn at {current_url}, trying reload...")
+            await page.reload(wait_until="domcontentloaded", timeout=15000)
+            try:
+                await page.wait_for_selector('div[data-testid="primaryColumn"]', timeout=12000)
+            except:
+                print(f"  ❌ FAILED: Still no primaryColumn after reload at {page.url}")
+                return False
+
+        # --- Poke Scroll to trigger lazy loading ---
+        print(f"  ⏳ Poking page to trigger lazy loading for {name}...")
+        await page.evaluate("window.scrollBy(0, 300)")
+        await page.wait_for_timeout(1000)
+        await page.evaluate("window.scrollBy(0, -300)")
+        await page.wait_for_timeout(500)
+
+        # --- Initial Wait for Content ---
+        print(f"  ⏳ Waiting for initial tweets to load for {name}...")
+        try:
+            # Wait for either a tweet or a cellInnerDiv which usually contains tweets/content
+            await page.wait_for_selector('article[data-testid="tweet"], div[data-testid="cellInnerDiv"]', timeout=15000)
+        except:
+            print(f"  ⚠️ Warning: No content found after initial wait for {name}.")
+
+        # Deep scroll to load more history
+        print(f"  ⏳ Deep scrolling for {name}...")
+        for i in range(10): # Back to 10 scrolls, smaller distance
+            await page.evaluate("window.scrollBy(0, 800)")
+            await page.wait_for_timeout(800)
         
         # --- Scrape Profile Metrics ---
         metrics = {}
@@ -167,17 +209,29 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time):
 
         # --- Scrape Recent Tweets ---
         tweet_count = 0
-        tweets = await page.query_selector_all('article[data-testid="tweet"]')
+        skipped_count = 0
+        all_tweets = await page.query_selector_all('article[data-testid="tweet"]')
         processed_tweets = []
+        
+        print(f"  🔍 Found {len(all_tweets)} potential tweets. Processing with 7-day filter...")
 
-        for tweet in tweets[:15]:
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
+
+        for tweet in all_tweets[:100]:
             try:
                 tweet_text_el = await tweet.query_selector('div[data-testid="tweetText"]')
                 if not tweet_text_el: continue
                 tweet_text = await tweet_text_el.inner_text()
-                
                 time_el = await tweet.query_selector('time')
                 posted_at = await time_el.get_attribute('datetime') if time_el else None
+                
+                if posted_at:
+                    # Clean up Z and convert to UTC datetime
+                    posted_dt = datetime.fromisoformat(posted_at.replace('Z', '+00:00'))
+                    if posted_dt < cutoff_date:
+                        # Skip old posts (likely pinned)
+                        skipped_count += 1
+                        continue
                 
                 tweet_id_el = await tweet.query_selector('a[href*="/status/"]')
                 tweet_url = "https://x.com" + await tweet_id_el.get_attribute('href')
@@ -239,8 +293,12 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time):
                 print(f"  ⚠️  Error parsing tweet for {name}: {e}")
                 continue
 
+        # Count total stored for this KOL in the 7-day window for verification
+        cur.execute("SELECT COUNT(*) FROM twitter_posts WHERE kol_id = %s AND (posted_at > %s OR (posted_at IS NULL AND captured_at > %s))", (kol_id, cutoff_date, cutoff_date))
+        total_stored = cur.fetchone()[0]
+        
         db.commit()
-        print(f"  ✅ Scraped {tweet_count} tweets for @{get_twitter_username(url)}")
+        print(f"  ✅ Finished @{get_twitter_username(url)}: {tweet_count} new/updated, {skipped_count} skipped. [Total 7d History: {total_stored} posts]")
         
         # Interaction scraping disabled for speed — each one adds a full page load
         # Uncomment to re-enable for detailed reply/repost usernames:
@@ -269,6 +327,15 @@ async def main():
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT DISTINCT user_id FROM kols WHERE status = 'active'")
         users = [str(r['user_id']) for r in cur.fetchall()]
+        
+        # [NEW] Optional filter to only scrape a specific user (ideal for local development)
+        limit_user = os.getenv("LIMIT_TO_USER_ID")
+        if limit_user:
+            if limit_user in users:
+                users = [limit_user]
+            else:
+                print(f"⚠️ LIMIT_TO_USER_ID={limit_user} set but no active KOLs found for this user. Skipping scrape.")
+                return
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=HEADLESS, args=['--no-sandbox'])
@@ -299,11 +366,11 @@ async def main():
                     
                     if "login" in page.url:
                         print(f"❌ User {user_id}: Twitter/X login failed with cookies!")
-                        update_scrape_status(db, f"❌ Login failed for user {user_id}")
+                        update_scrape_status(db, f"❌ Login failed", user_id)
                         await context.close()
                         continue
                     print(f"✅ User {user_id}: Twitter/X login successful!")
-                    update_scrape_status(db, f"✅ Session active for user {user_id}")
+                    update_scrape_status(db, f"✅ Session active", user_id)
 
                     # Filter KOLs by this user
                     cur2 = db.cursor()
@@ -312,8 +379,9 @@ async def main():
                     
                     for kol_id, name, url in kols:
                         try:
+                            update_scrape_status(db, f"Scraping {name}...", user_id)
                             await asyncio.wait_for(
-                                scrape_profile(page, kol_id, name, url, db, sync_time),
+                                scrape_profile(page, kol_id, name, url, db, sync_time, user_id=user_id),
                                 timeout=60
                             )
                         except asyncio.TimeoutError:
@@ -327,10 +395,11 @@ async def main():
                         await asyncio.sleep(0.5)
                 except Exception as e:
                     print(f"❌ User {user_id}: Critical session error: {e}")
+                    update_scrape_status(db, f"❌ Critical error: {e}", user_id)
                 
                 await context.close()
-                
-            update_scrape_status(db, "🏁 Scrape cycle complete.")
+                update_scrape_status(db, f"🏁 Scrape cycle complete for {len(kols)} KOLs.", user_id)
+                print(f"--- Finished Scrape for User ID: {user_id} ---")
         await browser.close()
     finally:
         release_db(db)

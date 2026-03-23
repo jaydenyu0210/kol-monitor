@@ -94,34 +94,36 @@ async def send_embeds(webhook_url: str, embeds: list):
 # ============================================================
 
 def build_post_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
-    """Build embeds for new posts from the last N minutes."""
+    """Build embeds for new posts that haven't been notified yet."""
     db = get_db()
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        # Get the latest scrape start time to anchor "New" discoveries
-        cur.execute("SELECT value FROM system_status WHERE key = 'twitter_scraper_status'")
-        status_row = cur.fetchone()
-        last_start_at = (status_row['value'] if status_row else {}).get('last_start_at')
-        
-        # 1. Get posts discovered for the first time in the CURRENT scrape round
-        # We use first_captured_at to identify brand new discoveries.
-        # Fallback to 15 mins ago if last_start_at is missing.
-        since = datetime.utcnow() - timedelta(minutes=interval_mins)
-        if last_start_at:
-            since = last_start_at
+        # Strict discovery window based on the scrape interval (plus a 2m buffer)
+        # The user wants ONLY posts with an actual post time in the last interval.
+        since = datetime.utcnow() - timedelta(minutes=interval_mins + 2)
 
         cur.execute("""
             SELECT tp.*, k.name as kol FROM twitter_posts tp
             JOIN kols k ON tp.kol_id = k.id
             WHERE k.user_id = %s 
-              AND tp.first_captured_at >= %s
-            ORDER BY tp.first_captured_at DESC
+              AND tp.is_notified = false
+              AND tp.posted_at >= %s
+            ORDER BY tp.posted_at DESC
         """, (user_id, since))
         posts = cur.fetchall()
 
         if posts:
-            update_feed_cache(user_id, 'posts', posts, overwrite=False)
+            # Mark as notified immediately
+            post_ids = [p['id'] for p in posts]
+            if len(post_ids) == 1:
+                cur.execute("UPDATE twitter_posts SET is_notified = true WHERE id = %s", (post_ids[0],))
+            else:
+                cur.execute("UPDATE twitter_posts SET is_notified = true WHERE id IN %s", (tuple(post_ids),))
+            db.commit()
+
+        # Update cache (Always overwrite for 'New Posts' so that it clears if none found)
+        update_feed_cache(user_id, 'posts', posts, overwrite=True)
 
         embeds = []
         for p in posts:
@@ -153,7 +155,8 @@ def build_following_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         # 1. Find the latest changes (delta != 0)
-        since = datetime.utcnow() - timedelta(minutes=interval_mins * 2)
+        # Buffer the window to 3x interval to avoid missing data if a scrape cycle lags
+        since = datetime.utcnow() - timedelta(minutes=interval_mins * 3)
         cur.execute("""
             SELECT m1.captured_at, m1.following_count as current, m2.following_count as previous, k.name as kol
             FROM kol_metrics m1
@@ -201,7 +204,8 @@ def build_follower_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         # 1. Find the latest changes (delta != 0) since interval
-        since = datetime.utcnow() - timedelta(minutes=interval_mins * 2)
+        # Buffer the window to 3x interval to avoid missing data if a scrape cycle lags
+        since = datetime.utcnow() - timedelta(minutes=interval_mins * 3)
         cur.execute("""
             SELECT m1.captured_at, m1.followers_count as current, m2.followers_count as previous, k.name as kol
             FROM kol_metrics m1
@@ -245,13 +249,15 @@ def build_heatmap_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         # Get the latest scrape start time to anchor deltas
-        cur.execute("SELECT value FROM system_status WHERE key = 'twitter_scraper_status'")
+        # Use user-specific status key
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
         status_row = cur.fetchone()
         last_start_at = (status_row['value'] if status_row else {}).get('last_start_at')
         
         # 1. Fetch posts with ANY engagement changes in the CURRENT scrape round
         # We look back 2x interval just in case, but anchor to last_start_at for precision
-        since = datetime.utcnow() - timedelta(minutes=interval_mins * 2)
+        # Buffer the window to 3x interval to avoid missing data if a scrape cycle lags
+        since = datetime.utcnow() - timedelta(minutes=interval_mins * 3)
         if last_start_at:
             since = last_start_at
 
@@ -333,12 +339,14 @@ def build_interaction_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL)
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         # Get the latest scrape start time to anchor deltas
-        cur.execute("SELECT value FROM system_status WHERE key = 'twitter_scraper_status'")
+        # Use user-specific status key
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
         status_row = cur.fetchone()
         last_start_at = (status_row['value'] if status_row else {}).get('last_start_at')
 
         # 1. Fetch interaction changes since interval
-        since = datetime.utcnow() - timedelta(minutes=interval_mins * 2)
+        # Buffer the window to 3x interval to avoid missing data if a scrape cycle lags
+        since = datetime.utcnow() - timedelta(minutes=interval_mins * 3)
         if last_start_at:
             since = last_start_at
 
@@ -353,7 +361,7 @@ def build_interaction_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL)
             FROM twitter_posts tp
             JOIN kols k ON tp.kol_id = k.id
             WHERE k.user_id = %s
-              AND tp.captured_at >= %s
+              AND (tp.captured_at >= %s OR tp.first_captured_at >= %s)
               AND (tp.likes != tp.last_likes OR tp.reposts != tp.last_reposts
                    OR tp.views != tp.last_views OR tp.comments != tp.last_comments)
             ORDER BY tp.captured_at DESC
@@ -424,10 +432,15 @@ async def push_all_channels(job_filter: str = None):
     """
     configs = get_all_user_webhooks()
     print(f"📡 Processing Discord push (Filter: {job_filter or 'All'}) for {len(configs)} user(s)...")
-
     tasks = []
     for config in configs:
         user_id = str(config["user_id"])
+        
+        # [NEW] Optional filter to only push for a specific user (ideal for local development)
+        limit_user = os.getenv("LIMIT_TO_USER_ID")
+        if limit_user and user_id != limit_user:
+            continue
+
         for webhook_key, build_fn in CHANNEL_MAP.items():
             # If a filter is provided (e.g., 'posts'), only process that channel
             if job_filter and job_filter not in webhook_key:
@@ -445,6 +458,14 @@ async def push_all_channels(job_filter: str = None):
 
                 if embeds:
                     tasks.append(send_embeds(webhook_url, embeds))
+                elif webhook_key == "discord_webhook_posts" and (job_filter is None or job_filter == "posts"):
+                    # The user wants an update even if none found: "even if no new posts, say new posts"
+                    tasks.append(send_embeds(webhook_url, [{
+                        "title": "📝 New X Posts",
+                        "description": "No new posts found in this scrape interval.",
+                        "color": 0x2C2F33, # Dark grey (Discord background flavor)
+                        "footer": {"text": f"Scrape Interval: {SCRAPE_INTERVAL}m | Check Complete"}
+                    }]))
             except Exception as e:
                 print(f"⚠️ Error building {webhook_key} for {user_id}: {e}")
 

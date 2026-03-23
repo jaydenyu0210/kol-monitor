@@ -24,4 +24,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:${PORT}/api/health || exit 1
 
 # Start API server and scheduler concurrently
-CMD ["sh", "-c", "python3 api_server.py & python3 scheduler.py"]
+CMD ["sh", "-c", "python3 -u api_server.py & python3 -u scheduler.py"]

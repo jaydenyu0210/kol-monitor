@@ -14,8 +14,8 @@ services:
       - "5432:5432"
 
   app:
-    build: .
-    container_name: kol-monitor-app
+    build: ./backend
+    container_name: kol-monitor-dev
     restart: always
     depends_on:
       - db
@@ -27,7 +27,7 @@ services:
     ports:
       - "3001:${API_PORT:-3000}"
     volumes:
-      - .:/app
+      - ./backend:/app
       - /app/.credentials # Prevent overwriting local credentials if using volumes
 
 volumes:

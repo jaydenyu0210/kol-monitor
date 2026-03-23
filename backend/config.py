@@ -20,7 +20,7 @@ API_PORT = int(os.getenv("PORT", os.getenv("API_PORT", "3000")))
 
 # --- Playwright / Scraper ---
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
-SCRAPE_INTERVAL = int(os.getenv("SCRAPE_INTERVAL_MINS", "30"))
+SCRAPE_INTERVAL = int(os.getenv("SCRAPE_INTERVAL_MINS", "15"))
 SLOW_MO = 1000
 
 # --- Frontend Origin (for CORS) ---

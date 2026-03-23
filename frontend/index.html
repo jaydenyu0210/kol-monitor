@@ -5,7 +5,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KOL Monitor Dashboard</title>
-  <script src="https://cdn.tailwindcss.com"></script> <!-- NOTE: CDN is used for simplicity; for production, consider using Tailwind CLI for better performance -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- NOTE: CDN is used for simplicity; for production, consider using Tailwind CLI for better performance -->
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@1.2.1/dist/chartjs-plugin-zoom.min.js"></script>
@@ -217,6 +218,11 @@
           class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium transition hidden">
           ⚡ Manual Scrape
         </button>
+        <button onclick="logout()"
+          class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm font-medium transition flex items-center gap-2 border border-slate-700">
+          <i data-lucide="log-out" class="w-4 h-4"></i>
+          Logout
+        </button>
       </div>
     </div>
 
@@ -239,6 +245,10 @@
         <div id="scrapeProgressBar"
           class="bg-blue-500 h-1.5 rounded-full transition-all duration-500 shadow-[0_0_10px_rgba(59,130,246,0.6)]"
           style="width: 0%"></div>
+      </div>
+      <!-- User-Isolated Scraper Logs -->
+      <div id="scrapeLogContainer" class="mt-4 bg-slate-950/80 rounded border border-slate-800 p-2 font-mono text-[10px] text-slate-400 h-24 overflow-y-auto hidden scrollbar-thin">
+        <div id="scrapeLogContent" class="space-y-0.5"></div>
       </div>
     </div>
 
@@ -344,6 +354,17 @@
       document.getElementById('loginOverlay').classList.add('hidden');
       pollScrapeStatus(); // Start polling first
       refreshAll();
+    }
+
+    async function logout() {
+      if (!confirm("Are you sure you want to log out?")) return;
+      try {
+        await supabaseClient.auth.signOut();
+        // The onAuthStateChange listener will handle redirection
+      } catch (e) {
+        console.error("Logout error:", e);
+        window.location.href = '/login.html';
+      }
     }
 
     function getUserId() {
@@ -471,6 +492,20 @@
           }
         }
 
+        // Update Scraper Logs
+        const logContainer = document.getElementById('scrapeLogContainer');
+        const logContent = document.getElementById('scrapeLogContent');
+        if (logContainer && logContent && (status.logs || []).length > 0) {
+          logContainer.classList.remove('hidden');
+          const newContent = status.logs.map(l => `<div>${l}</div>`).join('');
+          if (logContent.innerHTML !== newContent) {
+            logContent.innerHTML = newContent;
+            logContainer.scrollTop = logContainer.scrollHeight;
+          }
+        } else if (logContainer) {
+          logContainer.classList.add('hidden');
+        }
+
         if (status.last_updated) {
           const containerStatus = document.getElementById('statusContainer');
           if (containerStatus) containerStatus.classList.remove('hidden');
@@ -508,7 +543,8 @@
     }
 
     async function triggerManualScrape() {
-      if (!confirm('Trigger manual scrape now? This will run the full scraping cycle (46 KOLs).')) return;
+      const kolCount = document.getElementById('statKols')?.innerText || 'multiple';
+      if (!confirm(`Trigger manual scrape now? This will run the full scraping cycle (${kolCount} KOLs).`)) return;
 
       const btn = document.getElementById('manualScrapeBtn');
       const originalText = btn.innerHTML;
@@ -588,9 +624,14 @@
 
     async function renderDashboardFeed(el) {
       const initHistory = () => {
-        const date = document.getElementById('postsHistoryDate')?.value;
+        const dateInput = document.getElementById('postsHistoryDate');
+        const date = dateInput?.value;
         const sort = document.getElementById('postsHistorySort')?.value || 'recent';
-        if (date) loadDiscordPostsHistory(date, sort);
+        if (date) {
+          const todayStr = new Date().toLocaleDateString('en-CA');
+          const minutes = (date === todayStr) ? config_scrape_interval : null;
+          loadDiscordPostsHistory(date, sort, minutes);
+        }
       };
 
       if (cachedOverviewFeed) {
@@ -633,20 +674,29 @@
     }
 
     async function changeDiscordHistory() {
-      const date = document.getElementById('postsHistoryDate').value;
+      const dateInput = document.getElementById('postsHistoryDate');
+      const date = dateInput?.value;
       const sort = document.getElementById('postsHistorySort').value;
-      await loadDiscordPostsHistory(date, sort);
+      if (date) {
+        const todayStr = new Date().toLocaleDateString('en-CA');
+        const minutes = (date === todayStr) ? config_scrape_interval : null;
+        await loadDiscordPostsHistory(date, sort, minutes);
+      }
     }
 
-    async function loadDiscordPostsHistory(date, sort) {
+    async function loadDiscordPostsHistory(date, sort, minutes = null) {
       const listEl = document.getElementById('discordPostsHistory');
       if (!listEl) return;
 
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
       try {
-        const posts = await fetchJson(`/api/discord_posts_history?date=${date}&sort=${sort}&tz=${tz}`);
+        let url = `/api/discord_posts_history?date=${date}&sort=${sort}&tz=${tz}`;
+        if (minutes) url += `&minutes=${minutes}`;
+
+        const posts = await fetchJson(url);
         if (!posts || posts.length === 0) {
-          listEl.innerHTML = '<p class="text-xs text-slate-500 italic p-4 text-center">No posts found for this day.</p>';
+          const msg = minutes ? `No new posts found in the past ${minutes} minutes.` : 'No posts found for this day.';
+          listEl.innerHTML = `<p class="text-xs text-slate-500 italic p-4 text-center">${msg}</p>`;
           return;
         }
 
@@ -688,7 +738,7 @@
 
     function buildOverviewHTML(data) {
       const safeLoc = (val) => val != null ? val.toLocaleString() : '0';
-      const todayString = new Date().toISOString().split('T')[0];
+      const todayString = new Date().toLocaleDateString('en-CA');
 
       return `
     <div class="space-y-6">
@@ -776,7 +826,7 @@
     async function renderHeatmaps(el) {
       el.innerHTML = `
       <div class="card p-6 card-glow">
-          <h2 class="text-xl font-bold flex items-center text-white"><i data-lucide="bar-chart-2" class="mr-2 text-blue-400"></i> Historical X KOL Posts (Bubble Heatmap)</h2>
+          <h2 class="text-xl font-bold flex items-center text-white"><i data-lucide="bar-chart-2" class="mr-2 text-blue-400"></i> Historical X KOL Posts (Bubble Heatmap) <span id="heatmapTotalCount" class="ml-auto text-sm text-slate-500 font-normal"></span></h2>
         </div>
         <div class="text-sm text-slate-400 mb-6">
           <p><strong>X-Axis:</strong> Timeline (Published Date) &nbsp;|&nbsp; <strong>Y-Axis:</strong> Views &nbsp;|&nbsp; <strong>Bubble Size:</strong> Engagement Rate ((Replies+Reposts+Likes+Bookmarks)/Views) &nbsp;|&nbsp; <strong>Bubble Color:</strong> Reposts + Bookmarks (darker/redder = higher value)</p>
@@ -790,13 +840,16 @@
 
       const container = document.getElementById('heatmapContainer');
       try {
-        const data = await fetchJson('/api/twitter_posts?days=90&limit=5000');
+        const data = await fetchJson('/api/twitter_posts?days=7&limit=10000');
         const posts = data.posts;
 
         if (!posts || posts.length === 0) {
           container.innerHTML = '<p class="text-slate-400">No historical posts found.</p>';
           return;
         }
+
+        const totalHeader = document.getElementById('heatmapTotalCount');
+        if (totalHeader) totalHeader.innerText = `(${posts.length} total posts)`;
 
         const kols = {};
         posts.forEach(p => {
@@ -859,8 +912,8 @@
 
           const wrapper = document.createElement('div');
           wrapper.className = 'bg-slate-800 p-4 rounded-lg border border-slate-700';
-          const chartId = `chart-${kolName.replace(/\\W/g, '')}`;
-          wrapper.innerHTML = `<h3 class="font-bold text-lg mb-4 text-blue-300">${kolName}</h3><div style="height: 300px; position: relative;"><canvas id="${chartId}"></canvas></div>`;
+          const chartId = `chart-${kolName.replace(/\W/g, '')}`;
+          wrapper.innerHTML = `<h3 class="font-bold text-lg mb-4 text-blue-300 text-center">${kolName} (${kolPosts.length} posts)</h3><div style="height: 300px; position: relative;"><canvas id="${chartId}"></canvas></div>`;
           container.appendChild(wrapper);
 
           const ctx = document.getElementById(chartId).getContext('2d');

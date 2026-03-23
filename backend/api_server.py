@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import psycopg2
@@ -91,8 +91,11 @@ class UserConfigUpdate(BaseModel):
 
 # ---------- Status Sync Helper ----------
 
-def update_system_status(key, value_updates):
+def update_system_status(key, value_updates, user_id=None):
     try:
+        if user_id and key == 'twitter_scraper_status':
+            key = f'twitter_scraper_status_{user_id}'
+
         # Add Instance identification to help user distinguish between local and ghost instance
         if 'current_activity' in value_updates:
             activity = value_updates['current_activity']
@@ -233,16 +236,16 @@ def list_twitter_posts(
             cur.execute("""
                 SELECT tp.*, k.name as kol_name FROM twitter_posts tp
                 JOIN kols k ON tp.kol_id = k.id
-                WHERE k.user_id = %s AND tp.kol_id = %s AND tp.captured_at > %s
-                ORDER BY tp.captured_at DESC LIMIT %s
-            """, (user_id, kol_id, since, limit))
+                WHERE k.user_id = %s AND tp.kol_id = %s AND (tp.posted_at > %s OR (tp.posted_at IS NULL AND tp.captured_at > %s))
+                ORDER BY tp.posted_at DESC, tp.captured_at DESC LIMIT %s
+            """, (user_id, kol_id, since, since, limit))
         else:
             cur.execute("""
                 SELECT tp.*, k.name as kol_name FROM twitter_posts tp
                 JOIN kols k ON tp.kol_id = k.id
-                WHERE k.user_id = %s AND tp.captured_at > %s
-                ORDER BY tp.captured_at DESC LIMIT %s
-            """, (user_id, since, limit))
+                WHERE k.user_id = %s AND (tp.posted_at > %s OR (tp.posted_at IS NULL AND tp.captured_at > %s))
+                ORDER BY tp.posted_at DESC, tp.captured_at DESC LIMIT %s
+            """, (user_id, since, since, limit))
         return {"posts": cur.fetchall()}
     finally:
         release_db(db)
@@ -283,7 +286,11 @@ from config import SCRAPE_INTERVAL
 
 @app.get("/api/config")
 def get_backend_config(user_id: str = Depends(get_current_user)):
-    return {"scrape_interval": SCRAPE_INTERVAL}
+    return {
+        "scrape_interval": SCRAPE_INTERVAL,
+        "environment": os.getenv("ENVIRONMENT_NAME", "Production"),
+        "scraper_enabled": os.getenv("SCRAPER_ENABLED", "true").lower() == "true"
+    }
 
 
 @app.get("/api/scrape_status")
@@ -297,7 +304,7 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
         total_kols = cur.fetchone()['count']
         
         # Get status from system_status (scheduler/manual sync)
-        cur.execute("SELECT value FROM system_status WHERE key = 'twitter_scraper_status'")
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
         status_row = cur.fetchone()
         status_val = status_row['value'] if status_row and status_row['value'] else {}
         
@@ -332,7 +339,7 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
         last_updated = max_row['last_updated'].isoformat() if max_row and max_row['last_updated'] else None
         
         # Get status from system_status (scheduler/manual sync)
-        cur.execute("SELECT value FROM system_status WHERE key = 'twitter_scraper_status'")
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
         status_row = cur.fetchone()
         status_val = status_row['value'] if status_row and status_row['value'] else {}
         
@@ -347,7 +354,8 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
             "is_scraping": is_running_db,
             "current_activity": current_activity,
             "last_updated": last_updated,
-            "next_run_at": next_run_at
+            "next_run_at": next_run_at,
+            "logs": status_val.get('logs', [])
         }
     finally:
         release_db(db)
@@ -587,55 +595,62 @@ def get_discord_posts_history(
     date: str = None, 
     sort: str = "recent",
     tz: str = "UTC",
+    minutes: Optional[int] = None,
     user_id: str = Depends(get_current_user)
 ):
     """
-    Returns all posts captured for this user on a specific day, aligned to a timezone.
-    Used for the enhanced 'New X Posts' historical view on the dashboard.
+    Returns posts captured for this user. 
+    If minutes is provided, filters by discovery time in the last X minutes.
+    Otherwise, filters by discovery date in a specific timezone.
     """
-    if not date:
-        date = datetime.utcnow().strftime("%Y-%m-%d")
-        
     db = get_db()
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
         sort_dir = "DESC" if sort == "recent" else "ASC"
-        
-        # Filter by DATE of first_captured_at (discovery time), converted to requested timezone
-        cur.execute(f"""
-            SELECT tp.*, k.name as kol 
-            FROM twitter_posts tp
-            JOIN kols k ON tp.kol_id = k.id
-            WHERE k.user_id = %s 
-              AND (tp.first_captured_at AT TIME ZONE %s)::date = %s
-            ORDER BY tp.first_captured_at {sort_dir}, tp.posted_at {sort_dir}
-        """, (user_id, tz, date))
+
+        if minutes is not None:
+            # Filter by minutes relative to NOW (UTC)
+            since = datetime.utcnow() - timedelta(minutes=minutes)
+            cur.execute(f"""
+                SELECT tp.*, k.name as kol 
+                FROM twitter_posts tp
+                JOIN kols k ON tp.kol_id = k.id
+                WHERE k.user_id = %s 
+                  AND tp.posted_at >= %s
+                ORDER BY tp.posted_at DESC
+            """, (user_id, since))
+        else:
+            if not date:
+                date = datetime.utcnow().strftime("%Y-%m-%d")
+
+            # Filter by DATE of posted_at, converted to requested timezone
+            cur.execute(f"""
+                SELECT tp.*, k.name as kol 
+                FROM twitter_posts tp
+                JOIN kols k ON tp.kol_id = k.id
+                WHERE k.user_id = %s 
+                  AND (tp.posted_at AT TIME ZONE %s)::date = %s
+                ORDER BY tp.posted_at {sort_dir}, tp.first_captured_at {sort_dir}
+            """, (user_id, tz, date))
         
         return cur.fetchall()
     finally:
         release_db(db)
 
 
-def run_manual_scrape_task():
-    """Background task to run scraper and discord push"""
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Manual scrape triggered...")
+def run_manual_scrape_task(user_id):
+    """Background task to run scraper and discord push for a specific user"""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 Manual scrape task started in background", flush=True)
     
     # 0. Set is_running flag
     db = get_db()
     try:
         cur = db.cursor()
-        cur.execute("""
-            INSERT INTO system_status (key, value, updated_at)
-            VALUES ('twitter_scraper_status', %s, NOW())
-            ON CONFLICT (key) DO UPDATE SET 
-                value = jsonb_set(
-                    jsonb_set(system_status.value, '{is_running}', 'true'),
-                    '{last_start_at}', %s
-                ), 
-                updated_at = NOW()
-        """, (json.dumps({'is_running': True, 'last_start_at': datetime.now(timezone.utc).isoformat()}), json.dumps(datetime.now(timezone.utc).isoformat())))
-        db.commit()
+        update_system_status('twitter_scraper_status', {
+            'is_running': True,
+            'last_start_at': datetime.now(timezone.utc).isoformat(),
+            'current_activity': 'Starting manual scrape round...'
+        }, user_id=user_id)
     except Exception as e:
         print(f"⚠️ Error setting manual is_running: {e}")
     finally:
@@ -643,7 +658,15 @@ def run_manual_scrape_task():
 
     try:
         # 1. Run Scraper
-        subprocess.run([sys.executable, "-u", "/app/twitter_scraper.py"], timeout=3600)
+        # Ensure we use an absolute path that works in Docker and get immediate output
+        scraper_path = os.path.join(os.getcwd(), "twitter_scraper.py")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏃 Executing scraper for user {user_id}: {scraper_path}", flush=True)
+        
+        # Override LIMIT_TO_USER_ID for this specific run to ensure we scrape the requester
+        env = os.environ.copy()
+        env["LIMIT_TO_USER_ID"] = user_id
+        
+        subprocess.run([sys.executable, "-u", scraper_path], env=env, timeout=3600, check=True)
         # 2. Run Discord Pushes
         for job in ["posts", "following", "followers", "heatmap", "interactions"]:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Manual Pushing {job.upper()} to Discord...")
@@ -656,12 +679,13 @@ def run_manual_scrape_task():
         update_system_status('twitter_scraper_status', {
             'is_running': False,
             'current_activity': 'Monitor Idle - All KOLs up to date'
-        })
+        }, user_id=user_id)
 
 
 @app.post("/api/trigger_manual_scrape")
 async def trigger_manual_scrape(background_tasks: BackgroundTasks, user_id: str = Depends(get_current_user)):
-    background_tasks.add_task(run_manual_scrape_task)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📥 API: Received request to trigger manual scrape for user {user_id}", flush=True)
+    background_tasks.add_task(run_manual_scrape_task, user_id)
     return {"message": "Manual scrape triggered in background"}
 
 
