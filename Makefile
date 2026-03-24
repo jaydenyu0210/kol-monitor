@@ -7,7 +7,7 @@ dev:
 	@echo "📦 Starting Backend (Docker)..."
 	@docker compose up -d
 	@echo "🌐 Starting Frontend (Next.js)..."
-	@cd frontend-next && npm run dev
+	@cd frontend && npm run dev
 
 # 🛑 Stop everything
 stop:
