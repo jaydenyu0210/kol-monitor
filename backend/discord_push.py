@@ -4,7 +4,7 @@ Fetches per-user webhook URLs from Supabase user_configs table,
 then sends formatted embeds concurrently using httpx.
 """
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import psycopg2
@@ -16,37 +16,53 @@ from db import get_db, release_db
 from config import SCRAPE_INTERVAL
 
 
-def update_feed_cache(user_id, feed_type, items, max_items=50, overwrite=False):
+def update_feed_cache(user_id, feed_type, items, max_items=50, overwrite=False, metadata=None):
     """Write recent items to a JSON file, mirroring the Discord history."""
-    if not items: return
+    # Ensure items is at least an empty list if we have metadata to write
+    if not items and not metadata: return
+    
     def default_serializer(obj):
         if isinstance(obj, datetime): return obj.isoformat()
         raise TypeError(f"Type {type(obj)} not serializable")
     
-    clean_items = [dict(item) for item in items]
+    clean_items = [dict(item) for item in items] if items else []
     path = f"/app/feed_{feed_type}_{user_id}.json"
-    existing = []
+    
+    existing_items = []
+    existing_metadata = None
+    
     if not overwrite and os.path.exists(path):
         try:
-            with open(path, "r") as f: existing = json.load(f)
+            with open(path, "r") as f: 
+                data = json.load(f)
+                if isinstance(data, dict) and "items" in data:
+                    existing_items = data["items"]
+                    existing_metadata = data.get("metadata")
+                else:
+                    existing_items = data # Backward compatibility
         except Exception: pass
     
     # Deduplication and history merging
     unified = []
     seen = set()
-    # Newest items first, then historical
-    for item in clean_items + existing:
-        # Generate a stable key for deduplication
+    for item in clean_items + existing_items:
         key = item.get('post_id') or item.get('id') or item.get('url') or str(item.get('captured_at'))
         if not key: key = json.dumps(item, sort_keys=True)
         if key not in seen:
             unified.append(item)
             seen.add(key)
             
-    combined = unified[:max_items]
+    combined_items = unified[:max_items]
+    
+    # Final data structure
+    final_data = {
+        "items": combined_items,
+        "metadata": metadata or existing_metadata
+    }
+    
     try:
         with open(path, "w") as f:
-            json.dump(combined, f, default=default_serializer)
+            json.dump(final_data, f, default=default_serializer)
     except Exception as e:
         print(f"  ❌ Cache write error: {e} | Path: {path}")
 
@@ -94,39 +110,57 @@ async def send_embeds(webhook_url: str, embeds: list):
 # ============================================================
 
 def build_post_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
-    """Build embeds for new posts that haven't been notified yet."""
+    """Build embeds for new posts that haven't been notified yet, but cache ALL recent posts."""
     db = get_db()
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        # Strict discovery window based on the scrape interval (plus a 2m buffer)
-        # The user wants ONLY posts with an actual post time in the last interval.
-        since = datetime.utcnow() - timedelta(minutes=interval_mins + 2)
-
+        # 1. Fetch the actual scrape start time from the DB (the anchor for the window)
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
+        status_row = cur.fetchone()
+        status_val = status_row['value'] if status_row and status_row['value'] else {}
+        
+        last_start_str = status_val.get('last_start_at')
+        if last_start_str:
+            window_end = datetime.fromisoformat(last_start_str)
+        else:
+            window_end = datetime.now(timezone.utc)
+            
+        window_start = window_end - timedelta(minutes=interval_mins)
+        
         cur.execute("""
-            SELECT tp.*, k.name as kol FROM twitter_posts tp
+            SELECT tp.*, k.name as kol 
+            FROM twitter_posts tp
             JOIN kols k ON tp.kol_id = k.id
             WHERE k.user_id = %s 
-              AND tp.is_notified = false
               AND tp.posted_at >= %s
+              AND tp.posted_at <= %s
             ORDER BY tp.posted_at DESC
-        """, (user_id, since))
-        posts = cur.fetchall()
+        """, (user_id, window_start.isoformat(), window_end.isoformat()))
+        all_recent_posts = cur.fetchall()
 
-        if posts:
+        # Update cache with metadata for the Frontend "No results" message
+        metadata = {
+            "start_time": window_start.isoformat(),
+            "end_time": window_end.isoformat(),
+            "interval_mins": interval_mins
+        }
+        update_feed_cache(user_id, 'posts', all_recent_posts, overwrite=True, metadata=metadata)
+
+        # 2. Filter for UNNOTIFIED posts for the actual Discord Push
+        unnotified_posts = [p for p in all_recent_posts if not p.get('is_notified')]
+
+        if unnotified_posts:
             # Mark as notified immediately
-            post_ids = [p['id'] for p in posts]
+            post_ids = [p['id'] for p in unnotified_posts]
             if len(post_ids) == 1:
                 cur.execute("UPDATE twitter_posts SET is_notified = true WHERE id = %s", (post_ids[0],))
             else:
                 cur.execute("UPDATE twitter_posts SET is_notified = true WHERE id IN %s", (tuple(post_ids),))
             db.commit()
 
-        # Update cache (Always overwrite for 'New Posts' so that it clears if none found)
-        update_feed_cache(user_id, 'posts', posts, overwrite=True)
-
         embeds = []
-        for p in posts:
+        for p in unnotified_posts:
             content_preview = (p["content"] or "")[:300]
             embeds.append({
                 "title": f"📝 {p['kol']} posted",
@@ -138,7 +172,7 @@ def build_post_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
                     {"name": "🔄 Reposts", "value": str(p.get("reposts", 0)), "inline": True},
                 ],
                 "url": p.get("post_url", ""),
-                "timestamp": (p.get("posted_at") or datetime.utcnow()).isoformat(),
+                "timestamp": (p.get("posted_at") or datetime.now(timezone.utc)).isoformat(),
             })
         return embeds
     finally:
@@ -156,7 +190,7 @@ def build_following_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         # 1. Find the latest changes (delta != 0)
         # Buffer the window to 3x interval to avoid missing data if a scrape cycle lags
-        since = datetime.utcnow() - timedelta(minutes=interval_mins * 3)
+        since = datetime.now(timezone.utc) - timedelta(minutes=interval_mins * 3)
         cur.execute("""
             SELECT m1.captured_at, m1.following_count as current, m2.following_count as previous, k.name as kol
             FROM kol_metrics m1
@@ -205,7 +239,7 @@ def build_follower_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
 
         # 1. Find the latest changes (delta != 0) since interval
         # Buffer the window to 3x interval to avoid missing data if a scrape cycle lags
-        since = datetime.utcnow() - timedelta(minutes=interval_mins * 3)
+        since = datetime.now(timezone.utc) - timedelta(minutes=interval_mins * 3)
         cur.execute("""
             SELECT m1.captured_at, m1.followers_count as current, m2.followers_count as previous, k.name as kol
             FROM kol_metrics m1
@@ -257,7 +291,7 @@ def build_heatmap_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
         # 1. Fetch posts with ANY engagement changes in the CURRENT scrape round
         # We look back 2x interval just in case, but anchor to last_start_at for precision
         # Buffer the window to 3x interval to avoid missing data if a scrape cycle lags
-        since = datetime.utcnow() - timedelta(minutes=interval_mins * 3)
+        since = datetime.now(timezone.utc) - timedelta(minutes=interval_mins * 3)
         if last_start_at:
             since = last_start_at
 
@@ -321,7 +355,7 @@ def build_heatmap_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
                     {"name": "🔖 Bookmarks", "value": f"+{p['d_bookmarks']}", "inline": True},
                 ],
                 "footer": {"text": "Detected in last scrap round"},
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             })
         return embeds
     finally:
@@ -346,7 +380,7 @@ def build_interaction_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL)
 
         # 1. Fetch interaction changes since interval
         # Buffer the window to 3x interval to avoid missing data if a scrape cycle lags
-        since = datetime.utcnow() - timedelta(minutes=interval_mins * 3)
+        since = datetime.now(timezone.utc) - timedelta(minutes=interval_mins * 3)
         if last_start_at:
             since = last_start_at
 
@@ -365,7 +399,7 @@ def build_interaction_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL)
               AND (tp.likes != tp.last_likes OR tp.reposts != tp.last_reposts
                    OR tp.views != tp.last_views OR tp.comments != tp.last_comments)
             ORDER BY tp.captured_at DESC
-        """, (user_id, since))
+        """, (user_id, since, since))
         rows = cur.fetchall()
 
         if rows:
@@ -479,5 +513,5 @@ async def push_all_channels(job_filter: str = None):
 if __name__ == "__main__":
     import sys
     job_type = sys.argv[1] if len(sys.argv) > 1 else None
-    print(f"\n[{datetime.utcnow().strftime('%H:%M:%S')}] Running Discord Push...")
+    print(f"\n[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Running Discord Push...")
     asyncio.run(push_all_channels(job_type))

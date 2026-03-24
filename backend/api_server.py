@@ -18,7 +18,21 @@ from pydantic import BaseModel
 
 from config import API_PORT, FRONTEND_URL
 from db import get_db, release_db
+from config import SCRAPE_INTERVAL
 from auth import get_current_user
+
+DEFAULT_KOLS = [
+    "tussiwe", "BrianRoemmele", "AIBuzzNews", "heyDhavall", "iamfakhrealam", 
+    "RAVIKUMARSAHU78", "JaynitMakwana", "ai_for_success", "thetripathi58", 
+    "deedydas", "heyshrutimishra", "Parul_Gautam7", "riyazmd774", 
+    "socialwithaayan", "LearnWithBishal", "tec_aryan", "Rana_kamran43", 
+    "mhdfaran", "TechByMarkandey", "freest_man", "hasantoxr", "shedntcare_", 
+    "atulkumarzz", "HeyAbhishekk", "FellMentKE", "HeyNayeem", "swapnakpanda", 
+    "avikumart_", "Saboo_Shubham_", "_jaydeepkarale", "AngryTomtweets", 
+    "saxxhii_", "s_mohinii", "manishkumar_dev", "_akhaliq", "Sumanth_077", 
+    "allen_lattimer", "nrqa__", "TansuYegen", "SarahAnnabels", "SaniBulaAI", 
+    "Prathkum", "TheAIColony", "madzadev", "CodeByPoonam", "AndrewBolis"
+]
 
 app = FastAPI(title="KOL Monitor Pro API")
 
@@ -42,6 +56,85 @@ app.add_middleware(
 @app.get("/api/health")
 def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+# ---------- Database Initialization & Migration ----------
+
+def init_db():
+    """Ensure required tables exist and schema is correct for Supabase UUIDs."""
+    db = get_db()
+    try:
+        cur = db.cursor()
+        # Ensure user_configs exists (migrated from legacy users table logic)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_configs (
+                user_id TEXT PRIMARY KEY,
+                discord_webhook_posts TEXT,
+                discord_webhook_interactions TEXT,
+                discord_webhook_heatmap TEXT,
+                discord_webhook_following TEXT,
+                discord_webhook_followers TEXT,
+                twitter_auth_token TEXT,
+                twitter_ct0 TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # Ensure kols.user_id is TEXT to support Supabase UUIDs
+        cur.execute("""
+            DO $$ 
+            BEGIN 
+                IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='kols' AND column_name='user_id' AND data_type='integer') THEN
+                    ALTER TABLE kols ALTER COLUMN user_id TYPE TEXT USING user_id::TEXT;
+                END IF;
+            END $$;
+        """)
+        db.commit()
+        print("✅ Database schema initialized correctly.")
+    except Exception as e:
+        print(f"⚠️ Error initializing database: {e}")
+    finally:
+        release_db(db)
+
+def claim_legacy_data(user_id: str):
+    """If this is a new Supabase user, check if there's legacy data to claim."""
+    db = get_db()
+    try:
+        cur = db.cursor()
+        # Check if user already has KOLs
+        cur.execute("SELECT COUNT(*) FROM kols WHERE user_id = %s", (user_id,))
+        count = cur.fetchone()[0]
+        
+        if count == 0:
+            # Check if there are legacy KOLs (user_id = '1' or 'admin')
+            cur.execute("SELECT COUNT(*) FROM kols WHERE user_id IN ('1', 'admin')")
+            legacy_count = cur.fetchone()[0]
+            
+            if legacy_count > 0:
+                print(f"📦 Found {legacy_count} legacy KOLs. Claiming for user {user_id}...")
+                cur.execute("UPDATE kols SET user_id = %s WHERE user_id IN ('1', 'admin')", (user_id,))
+                
+                # Also claim legacy settings if any
+                cur.execute("SELECT COUNT(*) FROM user_configs WHERE user_id = %s", (user_id,))
+                if cur.fetchone()[0] == 0:
+                    cur.execute("""
+                        INSERT INTO user_configs (user_id, discord_webhook_posts, discord_webhook_interactions, discord_webhook_heatmap, twitter_auth_token, twitter_ct0)
+                        SELECT %s, discord_webhook_posts, discord_webhook_interactions, discord_webhook_heatmap, twitter_auth_token, twitter_ct0
+                        FROM user_configs WHERE user_id IN ('1', 'admin')
+                        ON CONFLICT DO NOTHING
+                    """, (user_id,))
+                
+                db.commit()
+                return True
+        return False
+    except Exception as e:
+        print(f"⚠️ Error claiming legacy data: {e}")
+        return False
+    finally:
+        release_db(db)
+
+# Initialize on startup
+init_db()
 
 
 # ---------- Pydantic Models ----------
@@ -97,10 +190,11 @@ def update_system_status(key, value_updates, user_id=None):
             key = f'twitter_scraper_status_{user_id}'
 
         # Add Instance identification to help user distinguish between local and ghost instance
+        env_name = os.getenv("ENVIRONMENT_NAME", "Local")
         if 'current_activity' in value_updates:
             activity = value_updates['current_activity']
-            if activity and 'Monitor Idle' not in activity:
-                value_updates['current_activity'] = f"{activity} (Instance: Docker-Mac)"
+            if activity:
+                value_updates['current_activity'] = f"{activity} (Instance: {env_name})"
         
         db = get_db()
         try:
@@ -110,10 +204,10 @@ def update_system_status(key, value_updates, user_id=None):
             status = row[0] if row else {}
             status.update(value_updates)
             cur.execute("""
-                INSERT INTO system_status (key, value, updated_at)
-                VALUES (%s, %s, NOW())
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-            """, (key, json.dumps(status)))
+                INSERT INTO system_status (key, value, updated_at, user_id)
+                VALUES (%s, %s, NOW(), %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), user_id = EXCLUDED.user_id
+            """, (key, json.dumps(status), user_id))
             db.commit()
         finally:
             release_db(db)
@@ -125,6 +219,9 @@ def update_system_status(key, value_updates, user_id=None):
 
 @app.get("/api/kols")
 def list_kols(status: str = "active", user_id: str = Depends(get_current_user)):
+    # Auto-claim if first time
+    claim_legacy_data(user_id)
+    
     db = get_db()
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -134,6 +231,25 @@ def list_kols(status: str = "active", user_id: str = Depends(get_current_user)):
             ORDER BY k.created_at DESC
         """, (user_id, status))
         kols = cur.fetchall()
+        
+        # Auto-seed if 0 active KOLs found
+        if not kols and status == "active":
+            print(f"🌱 [SEED] Auto-seeding {len(DEFAULT_KOLS)} default KOLs for {user_id}")
+            for handle in DEFAULT_KOLS:
+                twitter_url = f"https://x.com/{handle}"
+                cur.execute(
+                    "INSERT INTO kols (user_id, name, twitter_url, status) VALUES (%s, %s, %s, 'active')",
+                    (user_id, handle, twitter_url)
+                )
+            db.commit()
+            # Fetch again after seeding
+            cur.execute("""
+                SELECT k.* FROM kols k
+                WHERE k.user_id = %s AND k.status = %s
+                ORDER BY k.created_at DESC
+            """, (user_id, status))
+            kols = cur.fetchall()
+
         return {"kols": kols}
     finally:
         release_db(db)
@@ -346,16 +462,24 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
         next_run_at = status_val.get('next_run_at')
         is_running_db = status_val.get('is_running', False)
         current_activity = status_val.get('current_activity', 'System Idle')
+        
+        # Calculate relative seconds remaining to avoid client clock skew
+        next_run_seconds = 0
+        if next_run_at:
+            try:
+                nr_dt = datetime.fromisoformat(next_run_at)
+                diff = (nr_dt - datetime.now(timezone.utc)).total_seconds()
+                next_run_seconds = max(0, int(diff))
+            except: pass
 
         return {
             "total": total_kols,
             "scraped": scraped_kols,
-            "scraped_names": scraped_names,
-            "is_scraping": is_running_db,
-            "current_activity": current_activity,
-            "last_updated": last_updated,
-            "next_run_at": next_run_at,
-            "logs": status_val.get('logs', [])
+            "is_running": is_running_db,
+            "last_updated": status_val.get('last_start_at'),
+            "next_run_seconds": next_run_seconds,
+            "current_activity": status_val.get('current_activity'),
+            "instance": status_val.get('instance', 'Unknown')
         }
     finally:
         release_db(db)
@@ -427,6 +551,9 @@ def get_stats(user_id: str = Depends(get_current_user)):
 
 @app.get("/api/settings")
 def get_settings(user_id: str = Depends(get_current_user)):
+    # Auto-claim if first time
+    claim_legacy_data(user_id)
+    
     db = get_db()
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -596,11 +723,13 @@ def get_discord_posts_history(
     sort: str = "recent",
     tz: str = "UTC",
     minutes: Optional[int] = None,
+    days: Optional[int] = None,
     user_id: str = Depends(get_current_user)
 ):
     """
     Returns posts captured for this user. 
     If minutes is provided, filters by discovery time in the last X minutes.
+    If days is provided, filters by discovery time in the last X days.
     Otherwise, filters by discovery date in a specific timezone.
     """
     db = get_db()
@@ -619,21 +748,32 @@ def get_discord_posts_history(
                   AND tp.posted_at >= %s
                 ORDER BY tp.posted_at DESC
             """, (user_id, since))
-        else:
-            if not date:
-                date = datetime.utcnow().strftime("%Y-%m-%d")
-
-            # Filter by DATE of posted_at, converted to requested timezone
+        elif days is not None:
+             # Filter by days relative to NOW (UTC)
+            since = datetime.utcnow() - timedelta(days=days)
             cur.execute(f"""
-                SELECT tp.*, k.name as kol 
+                SELECT tp.*, k.name as kol, k.name as kol_name
                 FROM twitter_posts tp
                 JOIN kols k ON tp.kol_id = k.id
                 WHERE k.user_id = %s 
-                  AND (tp.posted_at AT TIME ZONE %s)::date = %s
-                ORDER BY tp.posted_at {sort_dir}, tp.first_captured_at {sort_dir}
-            """, (user_id, tz, date))
+                  AND tp.posted_at >= %s
+                ORDER BY tp.posted_at DESC
+            """, (user_id, since))
+            rows = cur.fetchall()
+            return { "posts": rows }
+        else:
+            # Default to last 7 days for general heatmap/summary
+            since = datetime.utcnow() - timedelta(days=7)
+            cur.execute(f"""
+                SELECT tp.*, k.name as kol, k.name as kol_name
+                FROM twitter_posts tp
+                JOIN kols k ON tp.kol_id = k.id
+                WHERE k.user_id = %s 
+                  AND tp.posted_at >= %s
+                ORDER BY tp.posted_at {sort_dir}
+            """, (user_id, since))
         
-        return cur.fetchall()
+        return { "posts": cur.fetchall() }
     finally:
         release_db(db)
 

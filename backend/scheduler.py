@@ -21,7 +21,7 @@ def update_system_status(key, value_updates, user_id=None):
         env_name = os.getenv("ENVIRONMENT_NAME", "Local")
         if 'current_activity' in value_updates:
             activity = value_updates['current_activity']
-            if activity and 'Monitor Idle' not in activity:
+            if activity:
                 value_updates['current_activity'] = f"{activity} (Instance: {env_name})"
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
@@ -46,30 +46,42 @@ def update_system_status(key, value_updates, user_id=None):
         
         # 4. Save back
         cur.execute("""
-            INSERT INTO system_status (key, value, updated_at)
-            VALUES (%s, %s, NOW())
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-        """, (key, json.dumps(status)))
+            INSERT INTO system_status (key, value, updated_at, user_id)
+            VALUES (%s, %s, NOW(), %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), user_id = EXCLUDED.user_id
+        """, (key, json.dumps(status), user_id))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"⚠️ Error updating system_status ({key}): {e}")
 
 def run_twitter_scraper():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🚀 [SCHEDULED SCRAPE] Starting...")
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🚀 [SCHEDULED SCRAPE] Initializing multi-tenant cycle...")
     
-    # Report that we are actively running
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        cur.execute("SELECT DISTINCT user_id FROM kols WHERE status = 'active'")
+        # Only scrape for users who have active KOLs AND configured Twitter credentials
+        cur.execute("""
+            SELECT DISTINCT k.user_id 
+            FROM kols k
+            JOIN user_configs uc ON k.user_id = uc.user_id
+            WHERE k.status = 'active' 
+              AND uc.twitter_auth_token IS NOT NULL 
+              AND uc.twitter_auth_token != ''
+        """)
         users = [str(r[0]) for r in cur.fetchall()]
         conn.close()
         
+        if not users:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ℹ️ [SCHEDULED SCRAPE] No active users with credentials found. Skipping.")
+            return
+
         for user_id in users:
             update_system_status('twitter_scraper_status', {
                 'is_running': True,
-                'last_start_at': datetime.now(timezone.utc).isoformat()
+                'last_start_at': datetime.now(timezone.utc).isoformat(),
+                'current_activity': 'Initializing profile scrape...'
             }, user_id=user_id)
     except Exception as e:
         print(f"⚠️ Scheduler status error: {e}")
@@ -127,15 +139,23 @@ def run_discord_push(job_type):
 
 def update_next_run_at(sched=None):
     """Safety sync: ensure next_run_at is in DB even if scheduler is starting up after crash."""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🕒 Performing startup schedule sync...")
     try:
         next_run_iso = None
+        # IF we have a running scheduler, try to get the real job time
         if sched:
             job = sched.get_job('twitter_scraper')
             if job and job.next_run_time:
-                next_run_iso = job.next_run_time.isoformat()
+                # Ensure the next run time isn't further away than the interval allows (stale state safety)
+                max_future = datetime.now(timezone.utc) + timedelta(minutes=SCRAPE_INTERVAL + 1)
+                if job.next_run_time > max_future:
+                    print(f"⚠️  APScheduler job time ({job.next_run_time}) is too far in future. Capping to {SCRAPE_INTERVAL}m.")
+                    next_run_iso = max_future.isoformat()
+                else:
+                    next_run_iso = job.next_run_time.isoformat()
         
         if not next_run_iso:
-            # Fallback only if scheduler hasn't populated yet
+            # Fallback/Default for startup
             next_run = datetime.now(timezone.utc) + timedelta(minutes=SCRAPE_INTERVAL)
             next_run_iso = next_run.isoformat()
 
@@ -150,11 +170,11 @@ def update_next_run_at(sched=None):
                 update_system_status('twitter_scraper_status', {
                     'next_run_at': next_run_iso,
                     'interval_mins': SCRAPE_INTERVAL,
-                    'is_running': False, # Startup safety
+                    'is_running': False, 
                     'current_activity': 'Monitor Idle - All KOLs up to date'
                 }, user_id=user_id)
             
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🕒 Next scheduled scrape updated in DB for {len(users)} users.")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Initial next_run_at set to {next_run_iso} for {len(users)} users.")
         except Exception as e:
             print(f"⚠️ Error updating initial user next_run: {e}")
     except Exception as e:

@@ -16,11 +16,11 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 
 # --- API Server ---
-API_PORT = int(os.getenv("PORT", os.getenv("API_PORT", "3000")))
+API_PORT = int(os.getenv("PORT", os.getenv("API_PORT", "3001")))
 
 # --- Playwright / Scraper ---
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
-SCRAPE_INTERVAL = int(os.getenv("SCRAPE_INTERVAL_MINS", "15"))
+SCRAPE_INTERVAL = 30 # Minutes (Hardcoded per user request)
 SLOW_MO = 1000
 
 # --- Frontend Origin (for CORS) ---

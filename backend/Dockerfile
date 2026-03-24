@@ -15,8 +15,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Railway injects PORT; default to 3000
-ENV PORT=3000
+# Railway injects PORT; default to 3001
+ENV PORT=3001
 EXPOSE ${PORT}
 
 # Health check for Railway monitoring
