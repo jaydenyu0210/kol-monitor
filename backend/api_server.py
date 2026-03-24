@@ -567,7 +567,7 @@ def get_settings(user_id: str = Depends(get_current_user)):
         release_db(db)
 
 
-@app.put("/api/settings/webhooks")
+@app.post("/api/settings/webhooks")
 def save_webhooks(data: UserConfigUpdate, user_id: str = Depends(get_current_user)):
     db = get_db()
     try:
