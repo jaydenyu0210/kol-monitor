@@ -15,6 +15,15 @@ import os
 from db import get_db, release_db
 from config import SCRAPE_INTERVAL
 
+def make_status_key(user_id=None):
+    env_suffix = os.getenv("ENVIRONMENT_NAME", "Local").replace(" ", "_").lower()
+    base = "twitter_scraper_status"
+    if env_suffix:
+        base = f"{base}_{env_suffix}"
+    if user_id:
+        base = f"{base}_{user_id}"
+    return base
+
 
 def update_feed_cache(user_id, feed_type, items, max_items=50, overwrite=False, metadata=None):
     """Write recent items to a JSON file, mirroring the Discord history."""
@@ -76,14 +85,15 @@ def get_all_user_webhooks():
             SELECT user_id,
                    discord_webhook_posts, discord_webhook_interactions,
                    discord_webhook_heatmap, discord_webhook_following,
-                   discord_webhook_followers
+                   discord_webhook_followers,
+                   COALESCE(scrape_interval_mins, %s) AS scrape_interval_mins
             FROM user_configs
             WHERE discord_webhook_posts IS NOT NULL
                OR discord_webhook_interactions IS NOT NULL
                OR discord_webhook_heatmap IS NOT NULL
                OR discord_webhook_following IS NOT NULL
                OR discord_webhook_followers IS NOT NULL
-        """)
+        """, (SCRAPE_INTERVAL,))
         return cur.fetchall()
     finally:
         release_db(db)
@@ -116,34 +126,37 @@ def build_post_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         # 1. Fetch the actual scrape start time from the DB (the anchor for the window)
-        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (make_status_key(user_id),))
         status_row = cur.fetchone()
         status_val = status_row['value'] if status_row and status_row['value'] else {}
+        if not status_val:
+            cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
+            legacy_row = cur.fetchone()
+            status_val = legacy_row['value'] if legacy_row and legacy_row['value'] else {}
         
         last_start_str = status_val.get('last_start_at')
-        if last_start_str:
-            window_end = datetime.fromisoformat(last_start_str)
-        else:
-            window_end = datetime.now(timezone.utc)
-            
-        window_start = window_end - timedelta(minutes=interval_mins)
-        
+        window_end = datetime.now(timezone.utc)
+        scrape_anchor = datetime.fromisoformat(last_start_str) if last_start_str else window_end
+        # Add a 2-minute buffer to the window to avoid missing posts at the edge
+        window_start = window_end - timedelta(minutes=interval_mins + 2)
+        time_expr = "COALESCE(tp.posted_at, tp.first_captured_at, tp.captured_at)"
+
         cur.execute("""
             SELECT tp.*, k.name as kol 
             FROM twitter_posts tp
             JOIN kols k ON tp.kol_id = k.id
             WHERE k.user_id = %s 
-              AND tp.posted_at >= %s
-              AND tp.posted_at <= %s
-            ORDER BY tp.posted_at DESC
-        """, (user_id, window_start.isoformat(), window_end.isoformat()))
+              AND {time_expr} BETWEEN %s AND %s
+            ORDER BY {time_expr} DESC
+        """.format(time_expr=time_expr), (user_id, window_start, window_end))
         all_recent_posts = cur.fetchall()
 
         # Update cache with metadata for the Frontend "No results" message
         metadata = {
             "start_time": window_start.isoformat(),
             "end_time": window_end.isoformat(),
-            "interval_mins": interval_mins
+            "interval_mins": interval_mins,
+            "scrape_anchor": scrape_anchor.isoformat()
         }
         update_feed_cache(user_id, 'posts', all_recent_posts, overwrite=True, metadata=metadata)
 
@@ -173,6 +186,7 @@ def build_post_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
                 ],
                 "url": p.get("post_url", ""),
                 "timestamp": (p.get("posted_at") or datetime.now(timezone.utc)).isoformat(),
+                "footer": {"text": f"Scrape Interval: {interval_mins}m"}
             })
         return embeds
     finally:
@@ -211,7 +225,11 @@ def build_following_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
             # Add delta for cache/frontend
             for r in rows:
                 r['delta'] = (r["current"] or 0) - (r["previous"] or 0)
-            update_feed_cache(user_id, 'following', rows, overwrite=False)
+            update_feed_cache(user_id, 'following', rows, overwrite=False, metadata={
+                "interval_mins": interval_mins,
+                "window_start": since.isoformat(),
+                "window_end": datetime.now(timezone.utc).isoformat()
+            })
 
         embeds = []
         for r in rows:
@@ -221,6 +239,7 @@ def build_following_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
                 "title": f"{arrow} {r['kol']}: Following {'+' if delta > 0 else ''}{delta}",
                 "description": f"Now following **{r['current']}** accounts",
                 "color": 0x00C853 if delta > 0 else 0xFF5252,
+                "footer": {"text": f"Scrape Interval: {interval_mins}m"},
             })
         return embeds
     finally:
@@ -260,7 +279,11 @@ def build_follower_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
             # Add delta for cache/frontend
             for r in rows:
                 r['delta'] = (r["current"] or 0) - (r["previous"] or 0)
-            update_feed_cache(user_id, 'followers', rows, overwrite=False)
+            update_feed_cache(user_id, 'followers', rows, overwrite=False, metadata={
+                "interval_mins": interval_mins,
+                "window_start": since.isoformat(),
+                "window_end": datetime.now(timezone.utc).isoformat()
+            })
 
         embeds = []
         for r in rows:
@@ -270,6 +293,7 @@ def build_follower_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
                 "title": f"{arrow} {r['kol']}: Followers {'+' if delta > 0 else ''}{delta}",
                 "description": f"Now at **{r['current']}** followers",
                 "color": 0x00C853 if delta > 0 else 0xFF5252,
+                "footer": {"text": f"Scrape Interval: {interval_mins}m"},
             })
         return embeds
     finally:
@@ -284,9 +308,14 @@ def build_heatmap_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
         
         # Get the latest scrape start time to anchor deltas
         # Use user-specific status key
-        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (make_status_key(user_id),))
         status_row = cur.fetchone()
-        last_start_at = (status_row['value'] if status_row else {}).get('last_start_at')
+        status_val = status_row['value'] if status_row and status_row['value'] else {}
+        if not status_val:
+            cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
+            legacy_row = cur.fetchone()
+            status_val = legacy_row['value'] if legacy_row and legacy_row['value'] else {}
+        last_start_at = (status_val or {}).get('last_start_at')
         
         # 1. Fetch posts with ANY engagement changes in the CURRENT scrape round
         # We look back 2x interval just in case, but anchor to last_start_at for precision
@@ -334,7 +363,12 @@ def build_heatmap_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
         # 2. Update Cache (Sort by recent first, then by score)
         # Identical matching: webpage and Discord now both show the FULL list of significant posts.
         trending_posts.sort(key=lambda x: (x['captured_at'], x['score']), reverse=True)
-        update_feed_cache(user_id, 'heatmap', trending_posts, overwrite=True)
+        update_feed_cache(user_id, 'heatmap', trending_posts, overwrite=True, metadata={
+            "interval_mins": interval_mins,
+            "anchor": (last_start_at.isoformat() if isinstance(last_start_at, datetime) else last_start_at),
+            "window_start": (since.isoformat() if isinstance(since, datetime) else since),
+            "window_end": datetime.now(timezone.utc).isoformat()
+        })
 
         if not trending_posts:
             return []
@@ -354,7 +388,7 @@ def build_heatmap_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
                     {"name": "👁️ Views", "value": f"+{p['d_views']}", "inline": True},
                     {"name": "🔖 Bookmarks", "value": f"+{p['d_bookmarks']}", "inline": True},
                 ],
-                "footer": {"text": "Detected in last scrap round"},
+                "footer": {"text": f"Detected in last scrap round | Interval: {interval_mins}m"},
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
         return embeds
@@ -374,9 +408,14 @@ def build_interaction_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL)
         
         # Get the latest scrape start time to anchor deltas
         # Use user-specific status key
-        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (make_status_key(user_id),))
         status_row = cur.fetchone()
-        last_start_at = (status_row['value'] if status_row else {}).get('last_start_at')
+        status_val = status_row['value'] if status_row and status_row['value'] else {}
+        if not status_val:
+            cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
+            legacy_row = cur.fetchone()
+            status_val = legacy_row['value'] if legacy_row and legacy_row['value'] else {}
+        last_start_at = (status_val or {}).get('last_start_at')
 
         # 1. Fetch interaction changes since interval
         # Buffer the window to 3x interval to avoid missing data if a scrape cycle lags
@@ -425,7 +464,11 @@ def build_interaction_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL)
                     'likes': r['likes'] or 0, 'reposts': r['reposts'] or 0, 'comments': r['comments'] or 0,
                     'repliers': repliers, 'reposters': reposters
                 })
-            update_feed_cache(user_id, 'interactions', cache_items, overwrite=True)
+            update_feed_cache(user_id, 'interactions', cache_items, overwrite=True, metadata={
+                "interval_mins": interval_mins,
+                "window_start": since.isoformat(),
+                "window_end": datetime.now(timezone.utc).isoformat()
+            })
             rows = significant_rows
 
         embeds = []
@@ -440,6 +483,7 @@ def build_interaction_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL)
                     {"name": "🔄 Reposts", "value": f"+{r['repost_delta'] or 0}", "inline": True},
                     {"name": "💬 Comments", "value": f"+{r['comment_delta'] or 0}", "inline": True},
                 ],
+                "footer": {"text": f"Scrape Interval: {interval_mins}m"},
             })
         return embeds
     finally:
@@ -469,6 +513,7 @@ async def push_all_channels(job_filter: str = None):
     tasks = []
     for config in configs:
         user_id = str(config["user_id"])
+        user_interval = int(config.get("scrape_interval_mins") or SCRAPE_INTERVAL)
         
         # [NEW] Optional filter to only push for a specific user (ideal for local development)
         limit_user = os.getenv("LIMIT_TO_USER_ID")
@@ -485,10 +530,7 @@ async def push_all_channels(job_filter: str = None):
                 continue
 
             try:
-                if webhook_key == "discord_webhook_heatmap":
-                    embeds = build_fn(user_id)
-                else:
-                    embeds = build_fn(user_id, interval_mins=SCRAPE_INTERVAL)
+                embeds = build_fn(user_id, interval_mins=user_interval) if webhook_key != "discord_webhook_heatmap" else build_fn(user_id, interval_mins=user_interval)
 
                 if embeds:
                     tasks.append(send_embeds(webhook_url, embeds))
@@ -498,7 +540,7 @@ async def push_all_channels(job_filter: str = None):
                         "title": "📝 New X Posts",
                         "description": "No new posts found in this scrape interval.",
                         "color": 0x2C2F33, # Dark grey (Discord background flavor)
-                        "footer": {"text": f"Scrape Interval: {SCRAPE_INTERVAL}m | Check Complete"}
+                        "footer": {"text": f"Scrape Interval: {user_interval}m | Check Complete"}
                     }]))
             except Exception as e:
                 print(f"⚠️ Error building {webhook_key} for {user_id}: {e}")

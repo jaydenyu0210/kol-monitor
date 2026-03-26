@@ -54,14 +54,16 @@ export default function ScraperStatus() {
     )
   }
 
-  const progress = status ? (status.scraped / (status.total || 1)) * 100 : 0
+  const isScraping = !!status?.is_running || !!status?.is_scraping
+  const scrapedCount = status?.scraped_count ?? status?.scraped ?? 0
+  const progress = status ? (scrapedCount / (status.total || 1)) * 100 : 0
 
   return (
     <div className="bg-slate-900/60 backdrop-blur-xl border border-white/5 rounded-3xl p-6 shadow-xl relative overflow-hidden group">
       <div className="absolute top-0 right-0 p-6 opacity-0 group-hover:opacity-100 transition-opacity">
         <button 
           onClick={handleTrigger}
-          disabled={triggering || status?.is_scraping}
+          disabled={triggering || isScraping}
           className="p-2 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-lg border border-blue-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_0_15px_rgba(59,130,246,0.1)] active:scale-95"
           title="Trigger Manual Scrape"
         >
@@ -70,21 +72,22 @@ export default function ScraperStatus() {
       </div>
 
       <div className="flex items-center gap-4 mb-6">
-        <div className={`p-3 rounded-2xl border ${status?.is_scraping ? 'bg-blue-500/10 border-blue-500/20 text-blue-400 shadow-[0_0_20px_rgba(59,130,246,0.15)]' : 'bg-slate-950/50 border-white/5 text-slate-500'}`}>
-          {status?.is_scraping ? <RefreshCcw className="w-6 h-6 animate-spin" /> : <CheckCircle2 className="w-6 h-6" />}
+        <div className={`p-3 rounded-2xl border ${isScraping ? 'bg-blue-500/10 border-blue-500/20 text-blue-400 shadow-[0_0_20px_rgba(59,130,246,0.15)]' : 'bg-slate-950/50 border-white/5 text-slate-500'}`}>
+          {isScraping ? <RefreshCcw className="w-6 h-6 animate-spin" /> : <CheckCircle2 className="w-6 h-6" />}
         </div>
         <div>
           <h3 className="text-sm font-bold text-white mb-1">Scraper Engine</h3>
           <p className="text-xs text-slate-500 font-medium tracking-tight">
             {status?.current_activity || 'System Idle'}
+            {status?.current_kol ? ` · ${status.current_kol}` : ''}
           </p>
         </div>
       </div>
 
-      {status?.is_scraping && (
+      {isScraping && (
         <div className="space-y-4 mb-6">
           <div className="flex justify-between text-[10px] font-bold text-slate-600 uppercase tracking-widest">
-            <span>Progress: {status.scraped} / {status.total}</span>
+            <span>Progress: {scrapedCount} / {status.total}</span>
             <span>{Math.round(progress)}%</span>
           </div>
           <div className="h-1.5 w-full bg-slate-950 rounded-full overflow-hidden border border-white/5">

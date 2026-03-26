@@ -1,11 +1,17 @@
 export interface ScrapeStatus {
   total: number
   scraped: number
+  scraped_count?: number
   scraped_names: string[]
-  is_scraping: boolean
+  is_running: boolean
+  is_scraping?: boolean
   current_activity: string
+  current_kol?: string | null
   last_updated: string | null
+  last_start_at?: string | null
   next_run_at: string | null
+  next_run_seconds?: number
+  interval_mins?: number
   logs: string[]
 }
 

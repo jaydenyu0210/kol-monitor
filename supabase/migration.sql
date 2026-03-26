@@ -107,6 +107,7 @@ CREATE TABLE public.user_configs (
     discord_webhook_followers    TEXT,
     twitter_auth_token           TEXT,
     twitter_ct0                  TEXT,
+    scrape_interval_mins         INT DEFAULT 30,
     created_at  TIMESTAMPTZ DEFAULT now(),
     updated_at  TIMESTAMPTZ DEFAULT now()
 );

@@ -15,6 +15,7 @@ interface WebhookConfigs {
   discord_webhook_heatmap: string
   discord_webhook_following: string
   discord_webhook_followers: string
+  scrape_interval_mins: number
 }
 
 export default function DiscordSettingsForm() {
@@ -23,7 +24,8 @@ export default function DiscordSettingsForm() {
     discord_webhook_interactions: '',
     discord_webhook_heatmap: '',
     discord_webhook_following: '',
-    discord_webhook_followers: ''
+    discord_webhook_followers: '',
+    scrape_interval_mins: 30
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -38,7 +40,8 @@ export default function DiscordSettingsForm() {
           discord_webhook_interactions: data.discord_webhook_interactions || '',
           discord_webhook_heatmap: data.discord_webhook_heatmap || '',
           discord_webhook_following: data.discord_webhook_following || '',
-          discord_webhook_followers: data.discord_webhook_followers || ''
+          discord_webhook_followers: data.discord_webhook_followers || '',
+          scrape_interval_mins: data.scrape_interval_mins || 30
         })
       } catch (err) {
         console.error('Failed to load settings', err)
@@ -75,6 +78,21 @@ export default function DiscordSettingsForm() {
   return (
     <form onSubmit={handleSave} className="space-y-4 animate-in fade-in duration-500">
       <div className="space-y-4">
+        <div className="space-y-1">
+          <label className="text-[10px] text-slate-500 uppercase font-bold mb-1 block tracking-widest">
+            Scrape Interval
+          </label>
+          <select
+            className="w-full bg-[#0f172a] border border-[#334155] rounded-xl px-4 py-2 text-xs text-white focus:border-purple-500 focus:outline-none transition-all"
+            value={configs.scrape_interval_mins}
+            onChange={(e) => setConfigs({ ...configs, scrape_interval_mins: Number(e.target.value) })}
+          >
+            {[5, 10, 30].map((v) => (
+              <option key={v} value={v}>{v} minutes</option>
+            ))}
+          </select>
+        </div>
+
         <WebhookInput
           label="New Posts Webhook"
           value={configs.discord_webhook_posts}

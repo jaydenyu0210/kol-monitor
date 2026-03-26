@@ -79,6 +79,7 @@ def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        cur.execute("ALTER TABLE user_configs ADD COLUMN IF NOT EXISTS scrape_interval_mins INT DEFAULT 30;")
         
         # Ensure kols.user_id is TEXT to support Supabase UUIDs
         cur.execute("""
@@ -180,14 +181,24 @@ class UserConfigUpdate(BaseModel):
     discord_webhook_heatmap: Optional[str] = None
     discord_webhook_following: Optional[str] = None
     discord_webhook_followers: Optional[str] = None
+    scrape_interval_mins: Optional[int] = None
 
 
 # ---------- Status Sync Helper ----------
 
+def make_status_key(user_id=None):
+    env_suffix = os.getenv("ENVIRONMENT_NAME", "Local").replace(" ", "_").lower()
+    base = "twitter_scraper_status"
+    if env_suffix:
+        base = f"{base}_{env_suffix}"
+    if user_id:
+        base = f"{base}_{user_id}"
+    return base
+
 def update_system_status(key, value_updates, user_id=None):
     try:
-        if user_id and key == 'twitter_scraper_status':
-            key = f'twitter_scraper_status_{user_id}'
+        if key == 'twitter_scraper_status':
+            key = make_status_key(user_id)
 
         # Add Instance identification to help user distinguish between local and ghost instance
         env_name = os.getenv("ENVIRONMENT_NAME", "Local")
@@ -195,6 +206,7 @@ def update_system_status(key, value_updates, user_id=None):
             activity = value_updates['current_activity']
             if activity:
                 value_updates['current_activity'] = f"{activity} (Instance: {env_name})"
+        value_updates['instance'] = env_name
         
         db = get_db()
         try:
@@ -347,21 +359,22 @@ def list_twitter_posts(
     db = get_db()
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        since = datetime.utcnow() - timedelta(days=days)
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        time_expr = "COALESCE(tp.posted_at, tp.first_captured_at, tp.captured_at)"
         if kol_id:
             cur.execute("""
                 SELECT tp.*, k.name as kol_name FROM twitter_posts tp
                 JOIN kols k ON tp.kol_id = k.id
-                WHERE k.user_id = %s AND tp.kol_id = %s AND (tp.posted_at > %s OR (tp.posted_at IS NULL AND tp.captured_at > %s))
-                ORDER BY tp.posted_at DESC, tp.captured_at DESC LIMIT %s
-            """, (user_id, kol_id, since, since, limit))
+                WHERE k.user_id = %s AND tp.kol_id = %s AND {time_expr} >= %s
+                ORDER BY {time_expr} DESC, tp.captured_at DESC LIMIT %s
+            """.format(time_expr=time_expr), (user_id, kol_id, since, limit))
         else:
             cur.execute("""
                 SELECT tp.*, k.name as kol_name FROM twitter_posts tp
                 JOIN kols k ON tp.kol_id = k.id
-                WHERE k.user_id = %s AND (tp.posted_at > %s OR (tp.posted_at IS NULL AND tp.captured_at > %s))
-                ORDER BY tp.posted_at DESC, tp.captured_at DESC LIMIT %s
-            """, (user_id, since, since, limit))
+                WHERE k.user_id = %s AND {time_expr} >= %s
+                ORDER BY {time_expr} DESC, tp.captured_at DESC LIMIT %s
+            """.format(time_expr=time_expr), (user_id, since, limit))
         return {"posts": cur.fetchall()}
     finally:
         release_db(db)
@@ -420,26 +433,34 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
         total_kols = cur.fetchone()['count']
         
         # Get status from system_status (scheduler/manual sync)
-        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
+        # Try instance-specific status first, then fallback to legacy key
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (make_status_key(user_id),))
         status_row = cur.fetchone()
         status_val = status_row['value'] if status_row and status_row['value'] else {}
+        if not status_val:
+            cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
+            legacy_row = cur.fetchone()
+            if legacy_row and legacy_row['value']:
+                status_val = legacy_row['value']
         
         last_start_at = status_val.get('last_start_at')
         is_running_db = status_val.get('is_running', False)
         current_activity = status_val.get('current_activity', 'System Idle')
         next_run_at = status_val.get('next_run_at')
+        # Pull user-configured interval (fallback to status -> default)
+        cur.execute("SELECT COALESCE(scrape_interval_mins, %s) as interval FROM user_configs WHERE user_id=%s", (SCRAPE_INTERVAL, user_id))
+        interval_row = cur.fetchone()
+        interval_mins = status_val.get('interval_mins') or (interval_row['interval'] if interval_row else SCRAPE_INTERVAL)
 
         # Calculate progress anchored to the last scrape start
+        scraped_rows = []
         if last_start_at:
-            # Count KOLs updated since the latest round started
             cur.execute("""
                 SELECT name FROM kols 
                 WHERE user_id=%s AND status='active' AND updated_at >= %s
                 ORDER BY updated_at DESC
             """, (user_id, last_start_at))
             scraped_rows = cur.fetchall()
-        else:
-            scraped_rows = []
         
         scraped_kols = len(scraped_rows)
         scraped_names = [r['name'] for r in scraped_rows]
@@ -454,15 +475,6 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
         max_row = cur.fetchone()
         last_updated = max_row['last_updated'].isoformat() if max_row and max_row['last_updated'] else None
         
-        # Get status from system_status (scheduler/manual sync)
-        cur.execute("SELECT value FROM system_status WHERE key = %s", (f'twitter_scraper_status_{user_id}',))
-        status_row = cur.fetchone()
-        status_val = status_row['value'] if status_row and status_row['value'] else {}
-        
-        next_run_at = status_val.get('next_run_at')
-        is_running_db = status_val.get('is_running', False)
-        current_activity = status_val.get('current_activity', 'System Idle')
-        
         # Calculate relative seconds remaining to avoid client clock skew
         next_run_seconds = 0
         if next_run_at:
@@ -470,16 +482,31 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
                 nr_dt = datetime.fromisoformat(next_run_at)
                 diff = (nr_dt - datetime.now(timezone.utc)).total_seconds()
                 next_run_seconds = max(0, int(diff))
-            except: pass
+            except: 
+                pass
+        elif last_start_at:
+            try:
+                ls_dt = datetime.fromisoformat(last_start_at)
+                next_run_seconds = max(0, int((ls_dt + timedelta(minutes=interval_mins) - datetime.now(timezone.utc)).total_seconds()))
+            except:
+                pass
 
         return {
             "total": total_kols,
             "scraped": scraped_kols,
+            "scraped_count": scraped_kols,
+            "scraped_names": scraped_names,
             "is_running": is_running_db,
-            "last_updated": status_val.get('last_start_at'),
+            "is_scraping": is_running_db,
+            "current_kol": status_val.get('current_kol'),
+            "last_updated": status_val.get('last_start_at') or last_updated,
+            "last_start_at": status_val.get('last_start_at'),
             "next_run_seconds": next_run_seconds,
+            "next_run_at": next_run_at,
+            "interval_mins": interval_mins,
             "current_activity": status_val.get('current_activity'),
-            "instance": status_val.get('instance', 'Unknown')
+            "instance": status_val.get('instance', 'Unknown'),
+            "logs": status_val.get('logs', [])
         }
     finally:
         release_db(db)
@@ -560,8 +587,9 @@ def get_settings(user_id: str = Depends(get_current_user)):
         cur.execute("SELECT * FROM user_configs WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         if not row:
-            return {"user_id": user_id, "has_cookies": False}
+            return {"user_id": user_id, "has_cookies": False, "scrape_interval_mins": 30}
         row["has_cookies"] = bool(row.get("twitter_auth_token"))
+        row["scrape_interval_mins"] = row.get("scrape_interval_mins") or 30
         return row
     finally:
         release_db(db)
@@ -571,21 +599,35 @@ def get_settings(user_id: str = Depends(get_current_user)):
 def save_webhooks(data: UserConfigUpdate, user_id: str = Depends(get_current_user)):
     db = get_db()
     try:
+        allowed_intervals = {5, 10, 30}
+        interval_mins = data.scrape_interval_mins if data.scrape_interval_mins in allowed_intervals else None
         cur = db.cursor()
         cur.execute("""
             INSERT INTO user_configs (user_id, discord_webhook_posts, discord_webhook_interactions,
-                discord_webhook_heatmap, discord_webhook_following, discord_webhook_followers)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                discord_webhook_heatmap, discord_webhook_following, discord_webhook_followers, scrape_interval_mins)
+            VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, 5))
             ON CONFLICT (user_id) DO UPDATE SET
                 discord_webhook_posts = COALESCE(EXCLUDED.discord_webhook_posts, user_configs.discord_webhook_posts),
                 discord_webhook_interactions = COALESCE(EXCLUDED.discord_webhook_interactions, user_configs.discord_webhook_interactions),
                 discord_webhook_heatmap = COALESCE(EXCLUDED.discord_webhook_heatmap, user_configs.discord_webhook_heatmap),
                 discord_webhook_following = COALESCE(EXCLUDED.discord_webhook_following, user_configs.discord_webhook_following),
                 discord_webhook_followers = COALESCE(EXCLUDED.discord_webhook_followers, user_configs.discord_webhook_followers),
+                scrape_interval_mins = COALESCE(EXCLUDED.scrape_interval_mins, user_configs.scrape_interval_mins),
                 updated_at = now()
         """, (user_id, data.discord_webhook_posts, data.discord_webhook_interactions,
-              data.discord_webhook_heatmap, data.discord_webhook_following, data.discord_webhook_followers))
+              data.discord_webhook_heatmap, data.discord_webhook_following, data.discord_webhook_followers, interval_mins))
         db.commit()
+
+        # Restart the user's scrape timer with the newly saved interval
+        if interval_mins:
+            next_run = datetime.now(timezone.utc) + timedelta(minutes=interval_mins)
+            update_system_status('twitter_scraper_status', {
+                'next_run_at': next_run.isoformat(),
+                'interval_mins': interval_mins,
+                'is_running': False,
+                'current_activity': f'Monitor Idle - Next run in {interval_mins}m'
+            }, user_id=user_id)
+
         return {"message": "Webhooks saved"}
     finally:
         release_db(db)
@@ -724,6 +766,7 @@ def get_discord_posts_history(
     tz: str = "UTC",
     minutes: Optional[int] = None,
     days: Optional[int] = None,
+    limit: Optional[int] = None,
     user_id: str = Depends(get_current_user)
 ):
     """
@@ -736,43 +779,32 @@ def get_discord_posts_history(
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         sort_dir = "DESC" if sort == "recent" else "ASC"
+        time_expr = "COALESCE(tp.posted_at, tp.first_captured_at, tp.captured_at)"
 
         if minutes is not None:
             # Filter by minutes relative to NOW (UTC)
-            since = datetime.utcnow() - timedelta(minutes=minutes)
-            cur.execute(f"""
-                SELECT tp.*, k.name as kol 
-                FROM twitter_posts tp
-                JOIN kols k ON tp.kol_id = k.id
-                WHERE k.user_id = %s 
-                  AND tp.posted_at >= %s
-                ORDER BY tp.posted_at DESC
-            """, (user_id, since))
+            since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
         elif days is not None:
-             # Filter by days relative to NOW (UTC)
-            since = datetime.utcnow() - timedelta(days=days)
-            cur.execute(f"""
-                SELECT tp.*, k.name as kol, k.name as kol_name
-                FROM twitter_posts tp
-                JOIN kols k ON tp.kol_id = k.id
-                WHERE k.user_id = %s 
-                  AND tp.posted_at >= %s
-                ORDER BY tp.posted_at DESC
-            """, (user_id, since))
-            rows = cur.fetchall()
-            return { "posts": rows }
+            # Filter by days relative to NOW (UTC)
+            since = datetime.now(timezone.utc) - timedelta(days=days)
         else:
             # Default to last 7 days for general heatmap/summary
-            since = datetime.utcnow() - timedelta(days=7)
-            cur.execute(f"""
-                SELECT tp.*, k.name as kol, k.name as kol_name
-                FROM twitter_posts tp
-                JOIN kols k ON tp.kol_id = k.id
-                WHERE k.user_id = %s 
-                  AND tp.posted_at >= %s
-                ORDER BY tp.posted_at {sort_dir}
-            """, (user_id, since))
-        
+            since = datetime.now(timezone.utc) - timedelta(days=7)
+
+        query = f"""
+            SELECT tp.*, k.name as kol, k.name as kol_name
+            FROM twitter_posts tp
+            JOIN kols k ON tp.kol_id = k.id
+            WHERE k.user_id = %s
+              AND {time_expr} >= %s
+            ORDER BY {time_expr} {sort_dir}, tp.captured_at {sort_dir}
+        """
+        params = [user_id, since]
+        if limit is not None:
+            query += " LIMIT %s"
+            params.append(limit)
+
+        cur.execute(query, params)
         return { "posts": cur.fetchall() }
     finally:
         release_db(db)
@@ -784,12 +816,17 @@ def run_manual_scrape_task(user_id):
     
     # 0. Set is_running flag
     db = get_db()
+    interval_mins = SCRAPE_INTERVAL
     try:
         cur = db.cursor()
+        cur.execute("SELECT COALESCE(scrape_interval_mins, %s) FROM user_configs WHERE user_id=%s", (SCRAPE_INTERVAL, user_id))
+        interval_row = cur.fetchone()
+        interval_mins = interval_row[0] if interval_row else SCRAPE_INTERVAL
         update_system_status('twitter_scraper_status', {
             'is_running': True,
             'last_start_at': datetime.now(timezone.utc).isoformat(),
-            'current_activity': 'Starting manual scrape round...'
+            'current_activity': 'Starting manual scrape round...',
+            'interval_mins': interval_mins
         }, user_id=user_id)
     except Exception as e:
         print(f"⚠️ Error setting manual is_running: {e}")
@@ -816,8 +853,10 @@ def run_manual_scrape_task(user_id):
         print(f"❌ Manual scrape task error: {e}")
     finally:
         # Clear is_running flag and reset activity
+        next_run = datetime.now(timezone.utc) + timedelta(minutes=interval_mins)
         update_system_status('twitter_scraper_status', {
             'is_running': False,
+            'next_run_at': next_run.isoformat(),
             'current_activity': 'Monitor Idle - All KOLs up to date'
         }, user_id=user_id)
 

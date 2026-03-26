@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { api } from '@/lib/api-client'
+import { ScrapeStatus } from '@/types/api'
 import { 
   Chart as ChartJS, 
   LinearScale, 
@@ -26,11 +27,12 @@ ChartJS.register(
 export default function BubbleHeatmap() {
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [scrapeStatus, setScrapeStatus] = useState<ScrapeStatus | null>(null)
 
   const fetchPosts = async (silent = false) => {
     if (!silent) setLoading(true)
     try {
-      const resp = await api.getPostHistory('?days=7&limit=5000')
+      const resp = await api.getPostHistory('?days=7&sort=recent')
       const posts = Array.isArray(resp) ? resp : (resp?.posts || [])
       setData(posts)
     } catch (err) {
@@ -42,6 +44,37 @@ export default function BubbleHeatmap() {
 
   useEffect(() => {
     fetchPosts()
+  }, [])
+
+  useEffect(() => {
+    let statusTimer: ReturnType<typeof setInterval> | null = null
+    let dataTimer: ReturnType<typeof setInterval> | null = null
+
+    const fetchStatus = async () => {
+      try {
+        const s = await api.getScrapeStatus()
+        setScrapeStatus(s)
+        if (s?.is_running) {
+          // While scraping, poll posts more aggressively to stream results
+          if (!dataTimer) {
+            dataTimer = setInterval(() => fetchPosts(true), 7000)
+          }
+        } else if (dataTimer) {
+          clearInterval(dataTimer)
+          dataTimer = null
+        }
+      } catch (err) {
+        console.error('Failed to fetch scrape status', err)
+      }
+    }
+
+    fetchStatus()
+    statusTimer = setInterval(fetchStatus, 10000)
+
+    return () => {
+      if (statusTimer) clearInterval(statusTimer)
+      if (dataTimer) clearInterval(dataTimer)
+    }
   }, [])
 
   if (loading) {
@@ -70,6 +103,25 @@ export default function BubbleHeatmap() {
           <p className="text-xs text-slate-400 mt-1">
             <b>X-Axis:</b> Timeline | <b>Y-Axis:</b> Views | <b>Bubble Size:</b> Engagement Rate | <b>Bubble Color:</b> Reposts + Bookmarks
           </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {scrapeStatus?.is_running ? (
+            <span className="text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/40 px-3 py-1.5 rounded-lg font-bold flex items-center gap-2">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Scraping {scrapeStatus.current_kol || 'KOLs'} ({scrapeStatus.scraped_count ?? scrapeStatus.scraped ?? 0}/{scrapeStatus.total || '?'})
+            </span>
+          ) : (
+            <span className="text-[10px] text-slate-400 bg-slate-800/60 border border-slate-700 px-3 py-1.5 rounded-lg font-bold">
+              Idle · auto-refresh each cycle
+            </span>
+          )}
+          <button
+            onClick={() => fetchPosts()}
+            className="flex items-center gap-2 text-[10px] font-bold px-3 py-1.5 rounded-lg bg-[#1e293b] border border-[#334155] text-slate-300 hover:border-blue-500/40 transition-all"
+            title="Refresh heatmap data"
+          >
+            <RefreshCw className="w-3 h-3" /> Refresh
+          </button>
         </div>
       </div>
 
@@ -102,9 +154,10 @@ function KolBubbleChart({ name, posts }: { name: string, posts: any[] }) {
 
         const valueScore = (p.reposts || 0) + (p.bookmarks || 0)
         const jitter = (Math.random() - 0.5) * (views * 0.1)
+        const postTime = p.posted_at || p.first_captured_at || p.captured_at
 
         return {
-          x: new Date(p.posted_at || p.captured_at).getTime(),
+          x: new Date(postTime).getTime(),
           y: Math.max(1, views + jitter),
           r: engagementRate,
           valueScore: valueScore,
@@ -182,7 +235,7 @@ function KolBubbleChart({ name, posts }: { name: string, posts: any[] }) {
         callbacks: {
           label: (context: any) => {
             const p = context.raw.raw
-            const dateStr = new Date(p.posted_at || p.captured_at).toLocaleString()
+            const dateStr = new Date(p.posted_at || p.first_captured_at || p.captured_at).toLocaleString()
             const viewsText = p.views ? p.views : (p.likes * 10) + ' (est.)'
             return [
               `Time: ${dateStr}`,
