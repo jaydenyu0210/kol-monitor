@@ -1,6 +1,21 @@
 import { createClient } from '@/lib/supabase/client'
 
-const RAILWAY_API_URL = process.env.NEXT_PUBLIC_RAILWAY_API_URL || 'http://localhost:3000'
+async function clientFetchOnce<T>(endpoint: string, options: RequestInit, token: string): Promise<T> {
+  const response = await fetch(endpoint, {
+    ...options,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`API Error ${response.status}`)
+  }
+
+  return response.json()
+}
 
 export async function clientFetch<T>(
   endpoint: string,
@@ -13,20 +28,19 @@ export async function clientFetch<T>(
     throw new Error('Unauthorized')
   }
 
-  const response = await fetch(`${RAILWAY_API_URL}${endpoint}`, {
-    ...options,
-    headers: {
-      'Authorization': `Bearer ${session.access_token}`,
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  })
+  const token = session.access_token
 
-  if (!response.ok) {
-    throw new Error('API Error')
+  // Retry once on connection errors (ECONNRESET / network glitches during Docker startup)
+  try {
+    return await clientFetchOnce<T>(endpoint, options, token)
+  } catch (err: any) {
+    const isConnectionError = err?.message === 'Failed to fetch' || err?.message?.includes('fetch') || err?.message?.startsWith('API Error 5')
+    if (isConnectionError) {
+      await new Promise(r => setTimeout(r, 1500))
+      return await clientFetchOnce<T>(endpoint, options, token)
+    }
+    throw err
   }
-
-  return response.json()
 }
 
 export const api = {

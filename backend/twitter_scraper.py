@@ -16,6 +16,21 @@ from playwright.async_api import async_playwright
 from db import get_db, release_db
 from config import HEADLESS, SLOW_MO
 
+# Logging filter: only print logs for specific user if LOG_USER_ID is set
+_LOG_USER_ID = os.getenv("LOG_USER_ID")
+
+def should_log(user_id=None):
+    """Returns True if we should log this message (based on LOG_USER_ID env var)."""
+    if not _LOG_USER_ID:
+        return True  # Log all by default
+    return user_id == _LOG_USER_ID
+
+def log_print(*args, **kwargs):
+    """Print wrapper that respects LOG_USER_ID filter."""
+    user_id = kwargs.pop('user_id', None)
+    if should_log(user_id):
+        print(*args, **kwargs)
+
 def make_status_key(user_id=None):
     env_suffix = os.getenv("ENVIRONMENT_NAME", "Local").replace(" ", "_").lower()
     base = "twitter_scraper_status"
@@ -140,70 +155,62 @@ async def scrape_post_interactions(page, db, twitter_post_id, tweet_url, interac
         print(f"  ⚠️ Error scraping {interaction_type}: {e}")
         db.rollback()
 
-async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
+async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None, search_counter=None):
     start_ts = datetime.now(timezone.utc)
     msg = f"Scraping {name} (@{get_twitter_username(url)})"
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+    log_print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", user_id=user_id)
     update_scrape_status(db, msg, user_id=user_id)
     
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-        
-        # Wait for the main react element to render or timeout
-        try:
-            await page.wait_for_selector('div[data-testid="primaryColumn"]', timeout=8000)
-        except Exception:
-            current_url = page.url
-            if "login" in current_url.lower():
-                print(f"  ❌ SESSION EXPIRED: Redirected to login page. Skipping profile.")
-                return False
-            
-            content = await page.content()
-            if "rate limit" in content.lower() or "something went wrong" in content.lower():
-                print(f"  ⚠️ RATE LIMITED: Twitter is blocking requests. Sleeping for a while...")
-                await asyncio.sleep(30)
-                return False
-
-            print(f"  ⚠️ Timeout waiting for primaryColumn at {current_url}, trying reload...")
-            await page.reload(wait_until="domcontentloaded", timeout=15000)
-            try:
-                await page.wait_for_selector('div[data-testid="primaryColumn"]', timeout=12000)
-            except:
-                print(f"  ❌ FAILED: Still no primaryColumn after reload at {page.url}")
-                return False
-
-        # --- Poke Scroll to trigger lazy loading ---
-        print(f"  ⏳ Poking page to trigger lazy loading for {name}...")
-        await page.evaluate("window.scrollBy(0, 300)")
-        await page.wait_for_timeout(1000)
-        await page.evaluate("window.scrollBy(0, -300)")
-        await page.wait_for_timeout(500)
-
-        # --- Initial Wait for Content ---
-        print(f"  ⏳ Waiting for initial tweets to load for {name}...")
-        try:
-            # Wait for either a tweet or a cellInnerDiv which usually contains tweets/content
-            await page.wait_for_selector('article[data-testid="tweet"], div[data-testid="cellInnerDiv"]', timeout=15000)
-        except:
-            print(f"  ⚠️ Warning: No content found after initial wait for {name}.")
-
-        # New approach: query search for each day in the last 7 days to guarantee full coverage
-        window_end = sync_time
-        window_start = sync_time - timedelta(days=7)
-        cutoff_date = window_start
+        # Skip profile page visit — go directly to search to save rate limit budget
         username = get_twitter_username(url)
+
+        # Search each calendar day in the last 7 days (clean date-aligned windows)
+        today = sync_time.date()
+        cutoff_date = sync_time - timedelta(days=7)
         seen_ids = set()
         collected = []
         per_day_counts = {}
 
-        async def scrape_day(day_start: datetime, day_end: datetime):
+        async def scrape_day(since_date, until_date):
+            """Scrape one calendar day: since_date (inclusive) to until_date (exclusive)."""
             nonlocal collected
-            day_label = day_start.strftime("%Y-%m-%d")
-            search_until_label = (day_end + timedelta(days=1)).strftime('%Y-%m-%d')
-            search_url = f"https://x.com/search?q=from%3A{username}%20since%3A{day_start.strftime('%Y-%m-%d')}%20until%3A{search_until_label}&src=typed_query&f=live"
-            print(f"  🔎 Day window {day_label}: {search_url}")
+            day_label = since_date.isoformat()
+            search_url = f"https://x.com/search?q=from%3A{username}%20since%3A{since_date.isoformat()}%20until%3A{until_date.isoformat()}&src=typed_query&f=live"
+            log_print(f"  🔎 Day {day_label}: {search_url}", user_id=user_id)
+            # Brief random pre-navigation pause to mimic human browsing
+            await page.wait_for_timeout(random.randint(1000, 2500))
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(1500)
+
+            # Wait for actual search results or empty state instead of fixed delay
+            try:
+                await page.wait_for_selector(
+                    'article[data-testid="tweet"], [data-testid="emptyState"]',
+                    timeout=10000
+                )
+            except:
+                # Timeout — check if we hit a rate limit or error page
+                content = await page.content()
+                content_lower = content.lower()
+                if "rate limit" in content_lower or "something went wrong" in content_lower:
+                    log_print(f"  ⚠️ Rate limited during search for {day_label}, signaling upstream", user_id=user_id)
+                    per_day_counts[day_label] = -1  # signal rate limit
+                    return
+            await page.wait_for_timeout(800)  # brief settle time
+
+            # Check for empty state and skip immediately if no results
+            empty = await page.query_selector('[data-testid="emptyState"]')
+            if empty:
+                per_day_counts[day_label] = 0
+                log_print(f"  🧭 Day {day_label}: no results (empty state)", user_id=user_id)
+                return
+
+            # Also check for error/rate limit content in the page body
+            page_text = await page.inner_text('body') if await page.query_selector('body') else ''
+            if 'something went wrong' in page_text.lower() or 'rate limit' in page_text.lower():
+                log_print(f"  ⚠️ Error page detected during search for {day_label}", user_id=user_id)
+                per_day_counts[day_label] = -1  # signal rate limit
+                return
 
             day_seen = 0
             stale = 0
@@ -226,31 +233,82 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
                     posted_at = await time_el.get_attribute('datetime') if time_el else None
                     if not posted_at:
                         continue
-                    posted_dt = datetime.fromisoformat(posted_at.replace('Z', '+00:00'))
-                    if not (day_start <= posted_dt < day_end):
-                        continue  # strictly enforce day window
+
+                    # Accept all tweets returned by the search (Twitter handles filtering)
+                    # No need for strict day_start/day_end filter since search is already 1 day
+
+                    # Debug: log first tweet's engagement DOM for diagnostics
+                    if day_seen == 0 and len(seen_ids) == 0:
+                        try:
+                            _dbg_group = await tweet.query_selector('[role="group"]')
+                            if _dbg_group:
+                                _dbg_aria = await _dbg_group.get_attribute('aria-label')
+                                _dbg_html = await _dbg_group.inner_html()
+                                log_print(f"    🔍 DEBUG first tweet group aria-label: {_dbg_aria}", user_id=user_id)
+                                log_print(f"    🔍 DEBUG first tweet group HTML (first 500): {_dbg_html[:500]}", user_id=user_id)
+                            else:
+                                _dbg_html = await tweet.inner_html()
+                                log_print(f"    🔍 DEBUG no [role=group] in first tweet, HTML (first 800): {_dbg_html[:800]}", user_id=user_id)
+                        except Exception as _dbg_e:
+                            log_print(f"    🔍 DEBUG error inspecting first tweet: {_dbg_e}", user_id=user_id)
 
                     # Extract counts
                     likes = '0'; reposts = '0'; replies = '0'; bookmarks = '0'; views = '0'
-                    group = await tweet.query_selector('[role=\"group\"]')
+                    group = await tweet.query_selector('[role="group"]')
                     if group:
                         aria = await group.get_attribute('aria-label')
                         if aria:
-                            replies_match = re.search(r'([\\d\\.,]+(?:[KMkm]?))\\s+replies', aria, re.I)
-                            reposts_match = re.search(r'([\\d\\.,]+(?:[KMkm]?))\\s+reposts', aria, re.I)
-                            likes_match = re.search(r'([\\d\\.,]+(?:[KMkm]?))\\s+likes', aria, re.I)
-                            bookmarks_match = re.search(r'([\\d\\.,]+(?:[KMkm]?))\\s+bookmarks', aria, re.I)
-                            views_match = re.search(r'([\\d\\.,]+(?:[KMkm]?))\\s+views', aria, re.I)
+                            replies_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+repl(?:y|ies)', aria, re.I)
+                            reposts_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+repost(?:s)?', aria, re.I)
+                            likes_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+like(?:s)?', aria, re.I)
+                            bookmarks_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+bookmark(?:s)?', aria, re.I)
+                            views_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+view(?:s)?', aria, re.I)
                             if replies_match: replies = replies_match.group(1)
                             if reposts_match: reposts = reposts_match.group(1)
                             if likes_match: likes = likes_match.group(1)
                             if bookmarks_match: bookmarks = bookmarks_match.group(1)
                             if views_match: views = views_match.group(1)
+                        else:
+                            log_print(f"    ⚠️ [role=group] found but no aria-label for {post_id}", user_id=user_id)
+
+                        # Fallback: extract from individual button aria-labels if group aria-label failed
+                        if likes == '0' and reposts == '0' and replies == '0':
+                            btn_map = {
+                                'reply': ('replies', r'([\d.,]+[KMkm]?)'),
+                                'retweet': ('reposts', r'([\d.,]+[KMkm]?)'),
+                                'like': ('likes', r'([\d.,]+[KMkm]?)'),
+                                'bookmark': ('bookmarks', r'([\d.,]+[KMkm]?)'),
+                            }
+                            for testid, (metric, pat) in btn_map.items():
+                                btn = await group.query_selector(f'button[data-testid="{testid}"]')
+                                if btn:
+                                    btn_aria = await btn.get_attribute('aria-label') or ''
+                                    m = re.search(pat, btn_aria)
+                                    if m:
+                                        val = m.group(1)
+                                        if testid == 'reply': replies = val
+                                        elif testid == 'retweet': reposts = val
+                                        elif testid == 'like': likes = val
+                                        elif testid == 'bookmark': bookmarks = val
+                            if likes != '0' or reposts != '0' or replies != '0':
+                                log_print(f"    🔄 Used button fallback for {post_id}: L={likes} R={reposts} C={replies} B={bookmarks}", user_id=user_id)
+                    else:
+                        log_print(f"    ⚠️ No [role=group] found for {post_id}", user_id=user_id)
 
                     if views == '0':
-                        views_el = await tweet.query_selector('a[href*=\"/analytics\"]')
+                        views_el = await tweet.query_selector('a[href*="/analytics"]')
                         if views_el:
-                            views = await views_el.get_attribute('aria-label') or '0'
+                            views_aria = await views_el.get_attribute('aria-label') or ''
+                            views_m = re.search(r'([\d.,]+[KMkm]?)', views_aria)
+                            if views_m:
+                                views = views_m.group(1)
+                        # Fallback: try span inside analytics link
+                        if views == '0':
+                            views_span = await tweet.query_selector('a[href*="/analytics"] span span')
+                            if views_span:
+                                views_text = (await views_span.inner_text()).strip()
+                                if views_text and views_text != '0':
+                                    views = views_text
 
                     tweet_text_el = await tweet.query_selector('div[data-testid=\"tweetText\"]')
                     tweet_text = await tweet_text_el.inner_text() if tweet_text_el else ''
@@ -276,20 +334,130 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
                     stale = 0
                 last_seen_local = day_seen
 
-                if stale >= 8:
+                if stale >= 5:
                     break
 
-                await page.evaluate("window.scrollBy(0, 2000)")
-                await page.wait_for_timeout(random.randint(500, 950))
+                await page.evaluate("window.scrollBy(0, 1500)")
+                await page.wait_for_timeout(random.randint(700, 1200))
 
             per_day_counts[day_label] = day_seen
-            print(f"  🧭 Day {day_label}: captured {day_seen} posts")
+            log_print(f"  🧭 Day {day_label}: captured {day_seen} posts", user_id=user_id)
 
-        # Iterate each day window (7 full days)
-        for i in range(7):
-            day_end = window_end - timedelta(days=i)
-            day_start = day_end - timedelta(days=1)
-            await scrape_day(day_start, day_end)
+        # Tiered day scraping to handle 10+ KOLs within Twitter's rate limits:
+        # - Today + yesterday: ALWAYS scraped (fresh content + engagement)
+        # - Days 2-7: only scraped if not captured in the last 60 minutes
+        # - Retry optimization: skip any day scraped within last 15 minutes
+        cur_recent = db.cursor()
+
+        # Get days scraped in last 15 minutes (for retry skip)
+        cur_recent.execute("""
+            SELECT DATE(posted_at) as post_date
+            FROM twitter_posts
+            WHERE kol_id = %s AND captured_at >= %s
+            GROUP BY DATE(posted_at)
+        """, (kol_id, sync_time - timedelta(minutes=15)))
+        very_recent = {str(row[0]) for row in cur_recent.fetchall()}
+
+        # Get days scraped in last 60 minutes (older days can be skipped)
+        cur_recent.execute("""
+            SELECT DATE(posted_at) as post_date
+            FROM twitter_posts
+            WHERE kol_id = %s AND captured_at >= %s
+            GROUP BY DATE(posted_at)
+        """, (kol_id, sync_time - timedelta(minutes=60)))
+        recent_60m = {str(row[0]) for row in cur_recent.fetchall()}
+
+        # Check if this KOL has ANY posts in DB at all (for empty accounts)
+        cur_recent.execute("SELECT COUNT(*) FROM twitter_posts WHERE kol_id = %s", (kol_id,))
+        total_historical = cur_recent.fetchone()[0]
+        max_days = 2 if total_historical == 0 else 8
+
+        day_windows = []
+        skipped_recent = 0
+        skipped_stale = 0
+        for i in range(max_days):
+            d = today - timedelta(days=i)
+            day_str = d.isoformat()
+            # Always skip days scraped very recently (retry optimization)
+            if day_str in very_recent:
+                log_print(f"  ⏭️  Day {day_str}: skipping (scraped <15m ago)", user_id=user_id)
+                skipped_recent += 1
+            # For older days (2+), skip if scraped within last 60 minutes
+            elif i >= 2 and day_str in recent_60m:
+                log_print(f"  ⏭️  Day {day_str}: skipping (scraped <60m ago)", user_id=user_id)
+                skipped_stale += 1
+            else:
+                day_windows.append((d, d + timedelta(days=1)))
+
+        total_skipped = skipped_recent + skipped_stale + (8 - max_days)
+        if total_skipped > 0:
+            log_print(f"  📋 Will scrape {len(day_windows)} days (skipped {total_skipped}: {skipped_recent} retry, {skipped_stale} stale, {8 - max_days} empty-KOL)", user_id=user_id)
+
+        def save_partial_results():
+            """Save whatever we've collected so far to DB."""
+            if not collected:
+                return
+            partial_cur = db.cursor()
+            count = 0
+            for item in collected:
+                try:
+                    partial_cur.execute("""
+                        INSERT INTO twitter_posts (
+                            kol_id, post_id, content, likes, reposts, comments, bookmarks, views, post_url, posted_at,
+                            first_captured_at, captured_at,
+                            last_likes, last_reposts, last_comments, last_bookmarks, last_views
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (post_id) DO UPDATE SET
+                            last_likes = CASE WHEN GREATEST(EXCLUDED.likes, twitter_posts.likes) != twitter_posts.likes THEN twitter_posts.likes ELSE twitter_posts.last_likes END,
+                            last_reposts = CASE WHEN GREATEST(EXCLUDED.reposts, twitter_posts.reposts) != twitter_posts.reposts THEN twitter_posts.reposts ELSE twitter_posts.last_reposts END,
+                            last_comments = CASE WHEN GREATEST(EXCLUDED.comments, twitter_posts.comments) != twitter_posts.comments THEN twitter_posts.comments ELSE twitter_posts.last_comments END,
+                            last_bookmarks = CASE WHEN GREATEST(EXCLUDED.bookmarks, twitter_posts.bookmarks) != twitter_posts.bookmarks THEN twitter_posts.bookmarks ELSE twitter_posts.last_bookmarks END,
+                            last_views = CASE WHEN GREATEST(EXCLUDED.views, twitter_posts.views) != twitter_posts.views THEN twitter_posts.views ELSE twitter_posts.last_views END,
+                            likes = GREATEST(EXCLUDED.likes, twitter_posts.likes),
+                            reposts = GREATEST(EXCLUDED.reposts, twitter_posts.reposts),
+                            comments = GREATEST(EXCLUDED.comments, twitter_posts.comments),
+                            bookmarks = GREATEST(EXCLUDED.bookmarks, twitter_posts.bookmarks),
+                            views = GREATEST(EXCLUDED.views, twitter_posts.views),
+                            captured_at = EXCLUDED.captured_at
+                    """, (
+                        kol_id, item['post_id'], item['content'], item['likes'], item['reposts'], item['comments'], item['bookmarks'], item['views'],
+                        item['url'], item['posted_at'], sync_time, sync_time,
+                        item['likes'], item['reposts'], item['comments'], item['bookmarks'], item['views']
+                    ))
+                    count += 1
+                except Exception:
+                    pass
+            db.commit()
+            log_print(f"  💾 Saved {count} partial results before context rotation", user_id=user_id)
+
+        rate_limited_days = 0
+        for since_date, until_date in day_windows:
+            await scrape_day(since_date, until_date)
+            if search_counter is not None:
+                search_counter[0] += 1
+            # Check if the day was rate-limited (signaled by -1)
+            day_label = since_date.isoformat()
+            if per_day_counts.get(day_label) == -1:
+                rate_limited_days += 1
+                if rate_limited_days >= 2:
+                    log_print(f"  ⚠️ Session degraded ({rate_limited_days} rate-limited days). Stopping early.", user_id=user_id)
+                    save_partial_results()
+                    return "session_degraded"
+                # First rate limit — cool down before trying next day
+                log_print(f"  ⏳ Rate limit cooldown: sleeping 90s...", user_id=user_id)
+                await asyncio.sleep(90)
+            # Progressive delay between day searches based on cumulative search count
+            total_searches = search_counter[0] if search_counter else 0
+            if total_searches > 30:
+                delay = random.randint(10000, 15000)
+            elif total_searches > 20:
+                delay = random.randint(8000, 12000)
+            elif total_searches > 10:
+                delay = random.randint(6000, 9000)
+            else:
+                delay = random.randint(5000, 8000)
+            await page.wait_for_timeout(delay)
 
         # --- Scrape Profile Metrics (once after search loops) ---
         
@@ -308,7 +476,7 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
                 followers_text = await followers_el.text_content()
                 metrics['followers'] = parse_count(followers_text)
         except Exception as e:
-            print(f"  ⚠️  Could not parse metrics for {name}: {e}")
+            log_print(f"  ⚠️  Could not parse metrics for {name}: {e}", user_id=user_id)
 
         cur = db.cursor()
         if metrics:
@@ -316,14 +484,14 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
                 INSERT INTO kol_metrics (kol_id, platform, followers_count, following_count, captured_at)
                 VALUES (%s, 'twitter', %s, %s, %s)
             """, (kol_id, metrics.get('followers'), metrics.get('following'), sync_time))
-            print(f"  📊 Metrics: Followers: {metrics.get('followers')}, Following: {metrics.get('following')}")
+            log_print(f"  📊 Metrics: Followers: {metrics.get('followers')}, Following: {metrics.get('following')}", user_id=user_id)
 
         # --- Scrape Recent Tweets (from collected search results) ---
         tweet_count = 0
         skipped_count = 0
         processed_tweets = []
         
-        print(f"  🔍 Inserting {len(collected)} collected tweets from search windows...")
+        log_print(f"  🔍 Inserting {len(collected)} collected tweets from search windows...", user_id=user_id)
 
         for item in collected:
             try:
@@ -335,17 +503,17 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
                         last_likes, last_reposts, last_comments, last_bookmarks, last_views
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (post_id) DO UPDATE SET 
-                        last_likes = CASE WHEN EXCLUDED.likes != twitter_posts.likes THEN twitter_posts.likes ELSE twitter_posts.last_likes END, 
-                        last_reposts = CASE WHEN EXCLUDED.reposts != twitter_posts.reposts THEN twitter_posts.reposts ELSE twitter_posts.last_reposts END, 
-                        last_comments = CASE WHEN EXCLUDED.comments != twitter_posts.comments THEN twitter_posts.comments ELSE twitter_posts.last_comments END, 
-                        last_bookmarks = CASE WHEN EXCLUDED.bookmarks != twitter_posts.bookmarks THEN twitter_posts.bookmarks ELSE twitter_posts.last_bookmarks END, 
-                        last_views = CASE WHEN EXCLUDED.views != twitter_posts.views THEN twitter_posts.views ELSE twitter_posts.last_views END,
-                        likes = EXCLUDED.likes, 
-                        reposts = EXCLUDED.reposts, 
-                        comments = EXCLUDED.comments, 
-                        bookmarks = EXCLUDED.bookmarks, 
-                        views = EXCLUDED.views, 
+                    ON CONFLICT (post_id) DO UPDATE SET
+                        last_likes = CASE WHEN GREATEST(EXCLUDED.likes, twitter_posts.likes) != twitter_posts.likes THEN twitter_posts.likes ELSE twitter_posts.last_likes END,
+                        last_reposts = CASE WHEN GREATEST(EXCLUDED.reposts, twitter_posts.reposts) != twitter_posts.reposts THEN twitter_posts.reposts ELSE twitter_posts.last_reposts END,
+                        last_comments = CASE WHEN GREATEST(EXCLUDED.comments, twitter_posts.comments) != twitter_posts.comments THEN twitter_posts.comments ELSE twitter_posts.last_comments END,
+                        last_bookmarks = CASE WHEN GREATEST(EXCLUDED.bookmarks, twitter_posts.bookmarks) != twitter_posts.bookmarks THEN twitter_posts.bookmarks ELSE twitter_posts.last_bookmarks END,
+                        last_views = CASE WHEN GREATEST(EXCLUDED.views, twitter_posts.views) != twitter_posts.views THEN twitter_posts.views ELSE twitter_posts.last_views END,
+                        likes = GREATEST(EXCLUDED.likes, twitter_posts.likes),
+                        reposts = GREATEST(EXCLUDED.reposts, twitter_posts.reposts),
+                        comments = GREATEST(EXCLUDED.comments, twitter_posts.comments),
+                        bookmarks = GREATEST(EXCLUDED.bookmarks, twitter_posts.bookmarks),
+                        views = GREATEST(EXCLUDED.views, twitter_posts.views),
                         captured_at = EXCLUDED.captured_at
                     RETURNING id
                 """, (
@@ -357,7 +525,7 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
                 processed_tweets.append({'db_id': db_post_id, 'url': item['url'], 'replies': item['comments'], 'reposts': item['reposts']})
                 tweet_count += 1
             except Exception as e:
-                print(f"  ⚠️  Error inserting tweet for {name}: {e}")
+                log_print(f"  ⚠️  Error inserting tweet for {name}: {e}", user_id=user_id)
                 skipped_count += 1
 
         # Count total stored for this KOL in the 7-day window for verification
@@ -367,10 +535,10 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
         db.commit()
         if per_day_counts:
             breakdown = ", ".join([f"{k}: {v}" for k, v in sorted(per_day_counts.items())])
-            print(f"  📅 Daily counts: {breakdown}")
+            log_print(f"  📅 Daily counts: {breakdown}", user_id=user_id)
         elapsed = (datetime.now(timezone.utc) - start_ts).total_seconds()
         unique_posts = len(seen_ids)
-        print(f"  ✅ Finished @{get_twitter_username(url)} in {elapsed:.1f}s: {tweet_count} inserted/updated, {skipped_count} skipped. [Total 7d History: {total_stored} posts | Unique posts seen: {unique_posts} | Days scraped: {len(per_day_counts)}]")
+        log_print(f"  ✅ Finished @{get_twitter_username(url)} in {elapsed:.1f}s: {tweet_count} inserted/updated, {skipped_count} skipped. [Total 7d History: {total_stored} posts | Unique posts seen: {unique_posts} | Days scraped: {len(per_day_counts)}]", user_id=user_id)
         
         # Interaction scraping disabled for speed — each one adds a full page load
         # Uncomment to re-enable for detailed reply/repost usernames:
@@ -387,19 +555,21 @@ async def scrape_profile(page, kol_id, name, url, db, sync_time, user_id=None):
         return True
 
     except Exception as e:
-        print(f"  ❌ Error scraping {name}: {e}")
+        log_print(f"  ❌ Error scraping {name}: {e}", user_id=user_id)
         db.rollback()
         return False
 
 async def main():
     db = get_db()
     sync_time = datetime.now(timezone.utc)
+    # Track total search requests across all KOLs to pace ourselves
+    global_search_count = 0
     try:
         # Scrape by User isolation
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT DISTINCT user_id FROM kols WHERE status = 'active'")
         users = [str(r['user_id']) for r in cur.fetchall()]
-        
+
         # Optional filter to only scrape specific users (comma-separated)
         limit_users_env = os.getenv("LIMIT_TO_USER_IDS")
         limit_user = os.getenv("LIMIT_TO_USER_ID")
@@ -415,19 +585,19 @@ async def main():
                 print(f"⚠️ LIMIT_TO_USER_IDS/LIMIT_TO_USER_ID set but no active KOLs found. Skipping scrape.")
                 return
             users = filtered
-        
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=HEADLESS, args=['--no-sandbox'])
             
             for user_id in users:
-                print(f"--- Starting Scrape for User ID: {user_id} ---")
+                log_print(f"--- Starting Scrape for User ID: {user_id} ---", user_id=user_id)
                 
                 # Fetch X cookies from user_configs table
                 cur.execute("SELECT twitter_auth_token, twitter_ct0 FROM user_configs WHERE user_id = %s", (user_id,))
                 config_row = cur.fetchone()
                 
                 if not config_row or not config_row.get('twitter_auth_token'):
-                    print(f"⚠️ User {user_id}: No X cookies configured. Skipping.")
+                    log_print(f"⚠️ User {user_id}: No X cookies configured. Skipping.", user_id=user_id)
                     continue
                 
                 user_auth = config_row['twitter_auth_token']
@@ -444,15 +614,33 @@ async def main():
                     await page.goto("https://x.com", wait_until="domcontentloaded", timeout=30000)
                     
                     if "login" in page.url:
-                        print(f"❌ User {user_id}: Twitter/X login failed with cookies!")
+                        log_print(f"❌ User {user_id}: Twitter/X login failed with cookies!", user_id=user_id)
                         update_scrape_status(db, f"❌ Login failed", user_id)
                         await context.close()
                         continue
-                    print(f"✅ User {user_id}: Twitter/X login successful!")
+                    log_print(f"✅ User {user_id}: Twitter/X login successful!", user_id=user_id)
+                    await page.close()  # Close login-test page; fresh pages created per KOL
                     # Initialize session-level progress state
                     cur2 = db.cursor()
-                    cur2.execute("SELECT id, name, twitter_url FROM kols WHERE status = 'active' AND user_id = %s", (user_id,))
-                    kols = cur2.fetchall()
+                    # Smart ordering: lightest KOLs first, heaviest last
+                    # This ensures lighter KOLs finish before rate limit budget is consumed
+                    cur2.execute("""
+                        SELECT k.id, k.name, k.twitter_url,
+                               COALESCE(pc.cnt, 0) as post_count
+                        FROM kols k
+                        LEFT JOIN (
+                            SELECT kol_id, COUNT(*) as cnt
+                            FROM twitter_posts
+                            WHERE captured_at >= NOW() - INTERVAL '7 days'
+                            GROUP BY kol_id
+                        ) pc ON k.id = pc.kol_id
+                        WHERE k.status = 'active' AND k.user_id = %s
+                        ORDER BY post_count ASC
+                    """, (user_id,))
+                    kols_raw = cur2.fetchall()
+                    kols = [(r[0], r[1], r[2]) for r in kols_raw]
+                    kol_order = ", ".join([f"{r[1]}({r[3]})" for r in kols_raw])
+                    log_print(f"📋 KOL order (lightest first): {kol_order}", user_id=user_id)
                     total_kols = len(kols)
                     scraped_count = 0
 
@@ -464,36 +652,113 @@ async def main():
                         'last_start_at': sync_time.isoformat()
                     })
 
+                    consecutive_zeros = 0
+                    # Mutable counter shared with scrape_profile to track total searches
+                    search_counter = [0]
+                    kol_timings = {}  # {name: {started_at, elapsed_s, posts}}
                     for idx, (kol_id, name, url) in enumerate(kols, start=1):
                         try:
+                            kol_start = datetime.now(timezone.utc)
+                            kol_timings[name] = {'started_at': kol_start.isoformat(), 'elapsed_s': None, 'posts': None}
                             update_scrape_status(db, f"Scraping {name}...", user_id, extra={
                                 'is_running': True,
                                 'total_kols': total_kols,
                                 'scraped_count': scraped_count,
-                                'current_kol': name
+                                'current_kol': name,
+                                'kol_timings': kol_timings
                             })
-                            await asyncio.wait_for(
-                                scrape_profile(page, kol_id, name, url, db, sync_time, user_id=user_id),
-                                timeout=240
+
+                            # Create a fresh page for each KOL to avoid session poisoning
+                            kol_page = await context.new_page()
+                            result = await asyncio.wait_for(
+                                scrape_profile(kol_page, kol_id, name, url, db, sync_time, user_id=user_id, search_counter=search_counter),
+                                timeout=600
                             )
+                            await kol_page.close()
+
+                            # Handle rate limiting / session degradation
+                            if result == "rate_limited" or result == "session_degraded":
+                                log_print(f"  🔄 Session degraded on {name}, rotating context quickly and moving to next...", user_id=user_id)
+                                await context.close()
+                                # No more 120s retry — it wastes time on IP blocks. 
+                                # Just rotate and keep going with the next KOL.
+                                context = await browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36')
+                                await context.add_cookies([
+                                    {'name': 'auth_token', 'value': user_auth, 'domain': '.x.com', 'path': '/'},
+                                    {'name': 'ct0', 'value': user_ct0, 'domain': '.x.com', 'path': '/'}
+                                ])
+                                consecutive_zeros = 0
+                            elif result is True:
+                                consecutive_zeros = 0
+                            else:
+                                consecutive_zeros += 1
+
+                            # If 3+ consecutive KOLs got 0 posts, rotate context proactively
+                            if consecutive_zeros >= 3:
+                                log_print(f"  🔄 {consecutive_zeros} consecutive KOLs with 0 posts — rotating browser context...", user_id=user_id)
+                                await context.close()
+                                await asyncio.sleep(30)
+                                context = await browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36')
+                                await context.add_cookies([
+                                    {'name': 'auth_token', 'value': user_auth, 'domain': '.x.com', 'path': '/'},
+                                    {'name': 'ct0', 'value': user_ct0, 'domain': '.x.com', 'path': '/'}
+                                ])
+                                consecutive_zeros = 0
+
                             scraped_count = idx
+                            kol_elapsed = (datetime.now(timezone.utc) - kol_start).total_seconds()
+                            kol_timings[name] = {'started_at': kol_start.isoformat(), 'elapsed_s': round(kol_elapsed, 1), 'posts': None}
                             update_scrape_status(db, f"Finished {name}", user_id, extra={
                                 'is_running': True,
                                 'total_kols': total_kols,
                                 'scraped_count': scraped_count,
-                                'current_kol': name
+                                'current_kol': name,
+                                'kol_timings': kol_timings
                             })
                         except asyncio.TimeoutError:
-                            print(f"  ⏰ Timeout scraping {name} (60s), skipping...")
+                            log_print(f"  ⏰ Timeout scraping {name} (600s), skipping...", user_id=user_id)
+                            scraped_count = idx
+                            kol_timings[name] = {'started_at': kol_start.isoformat(), 'elapsed_s': round((datetime.now(timezone.utc) - kol_start).total_seconds(), 1), 'posts': None, 'error': 'timeout'}
+                            update_scrape_status(db, f"Timeout {name}", user_id, extra={
+                                'is_running': True, 'total_kols': total_kols,
+                                'scraped_count': scraped_count, 'current_kol': name,
+                                'kol_timings': kol_timings
+                            })
                             cur2.execute("UPDATE kols SET updated_at = %s WHERE id = %s", (sync_time, kol_id))
                             db.commit()
+                            try:
+                                await kol_page.close()
+                            except:
+                                pass
                         except Exception as e:
-                            print(f"  ❌ Error scraping {name}: {e}")
+                            log_print(f"  ❌ Error scraping {name}: {e}", user_id=user_id)
+                            scraped_count = idx
+                            kol_timings[name] = {'started_at': kol_start.isoformat(), 'elapsed_s': round((datetime.now(timezone.utc) - kol_start).total_seconds(), 1), 'posts': None, 'error': str(e)[:100]}
+                            update_scrape_status(db, f"Error {name}", user_id, extra={
+                                'is_running': True, 'total_kols': total_kols,
+                                'scraped_count': scraped_count, 'current_kol': name,
+                                'kol_timings': kol_timings
+                            })
                             cur2.execute("UPDATE kols SET updated_at = %s WHERE id = %s", (sync_time, kol_id))
                             db.commit()
-                        await asyncio.sleep(0.5)
+                            try:
+                                await kol_page.close()
+                            except:
+                                pass
+                        # Progressive inter-KOL delay: increases as more searches accumulate
+                        total_searches = search_counter[0]
+                        if total_searches > 30:
+                            kol_delay = random.randint(40, 60)
+                        elif total_searches > 20:
+                            kol_delay = random.randint(25, 40)
+                        elif total_searches > 10:
+                            kol_delay = random.randint(15, 25)
+                        else:
+                            kol_delay = random.randint(10, 15)
+                        log_print(f"  ⏸️  Inter-KOL cooldown: {kol_delay}s (total searches so far: {total_searches})", user_id=user_id)
+                        await asyncio.sleep(kol_delay)
                 except Exception as e:
-                    print(f"❌ User {user_id}: Critical session error: {e}")
+                    log_print(f"❌ User {user_id}: Critical session error: {e}", user_id=user_id)
                     update_scrape_status(db, f"❌ Critical error: {e}", user_id)
                 
                 await context.close()
@@ -503,7 +768,7 @@ async def main():
                     'scraped_count': scraped_count,
                     'current_kol': None
                 })
-                print(f"--- Finished Scrape for User ID: {user_id} ---")
+                log_print(f"--- Finished Scrape for User ID: {user_id} ---", user_id=user_id)
         await browser.close()
     finally:
         release_db(db)

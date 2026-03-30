@@ -124,29 +124,19 @@ def run_twitter_scraper():
                     'current_activity': f'Monitor Idle - Next run in {interval_mins}m'
                 }, user_id=user_id)
 
-            # If already running, just advance the timer cycle and skip starting a new run
+            # If already running, skip — don't touch the timer
             if is_running:
-                if now >= next_run_dt:
-                    while next_run_dt <= now:
-                        next_run_dt += timedelta(minutes=interval_mins)
-                    update_system_status('twitter_scraper_status', {
-                        'next_run_at': next_run_dt.isoformat(),
-                        'interval_mins': interval_mins
-                    }, user_id=user_id)
                 continue
 
             # Only start when timer has fully elapsed
             if next_run_dt and now >= (next_run_dt - tolerance):
-                next_cycle = next_run_dt + timedelta(minutes=interval_mins)
-                while next_cycle <= now:
-                    next_cycle += timedelta(minutes=interval_mins)
                 due_users.append((user_id, interval_mins))
                 update_system_status('twitter_scraper_status', {
                     'is_running': True,
                     'last_start_at': now.isoformat(),
                     'current_activity': 'Initializing profile scrape...',
                     'interval_mins': interval_mins,
-                    'next_run_at': next_cycle.isoformat()
+                    'next_run_at': None  # Clear timer while scraping
                 }, user_id=user_id)
         conn.close()
     except Exception as e:
@@ -180,38 +170,19 @@ def run_twitter_scraper():
         for job in ["posts", "following", "followers", "heatmap", "interactions"]:
             run_discord_push(job)
         
-        # Report that we are finished for processed users
+        # After scrape finishes, set next_run_at = now + interval
+        # Timer only restarts AFTER scraping is done
         try:
             now_done = datetime.now(timezone.utc)
             for user_id, interval_mins in due_users:
-                # Preserve the pre-set cycle; if it's in the past, advance by interval until future
-                next_run = None
-                try:
-                    conn = psycopg2.connect(DATABASE_URL)
-                    cur = conn.cursor()
-                    cur.execute("SELECT value FROM system_status WHERE key = %s", (make_status_key(user_id),))
-                    row = cur.fetchone()
-                    status = row[0] if row else {}
-                    nr = status.get('next_run_at')
-                    if nr:
-                        try:
-                            next_run = datetime.fromisoformat(nr)
-                        except Exception:
-                            next_run = None
-                    conn.close()
-                except Exception:
-                    pass
-                if not next_run:
-                    next_run = now_done + timedelta(minutes=interval_mins)
-                while next_run <= now_done:
-                    next_run += timedelta(minutes=interval_mins)
-
+                next_run = now_done + timedelta(minutes=interval_mins)
                 update_system_status('twitter_scraper_status', {
                     'is_running': False,
                     'current_activity': 'Monitor Idle - All KOLs up to date',
                     'next_run_at': next_run.isoformat(),
                     'interval_mins': interval_mins
                 }, user_id=user_id)
+                print(f"[{now_done.strftime('%H:%M:%S')}] ✅ Scrape done for user {user_id}. Next run at {next_run.strftime('%H:%M:%S')} ({interval_mins}m from now)")
         except Exception as e:
             print(f"⚠️ Scheduler status completion error: {e}")
 

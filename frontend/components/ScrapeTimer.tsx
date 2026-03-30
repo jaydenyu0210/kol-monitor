@@ -40,25 +40,22 @@ export default function ScrapeTimer() {
     if (!status) return
 
     const timerInterval = setInterval(() => {
-      const now = Date.now()
-      const intervalMs = Math.max(1, (status.interval_mins || 5) * 60 * 1000)
-      let remainingMs = 0
-
-      if (status.next_run_seconds !== undefined && status.next_run_seconds !== null) {
-        const elapsedSinceFetch = Math.floor((now - status.fetchedAt) / 1000)
-        remainingMs = Math.max(0, (status.next_run_seconds - elapsedSinceFetch) * 1000)
+      // While scraping, show elapsed time instead of countdown
+      if (status.is_running) {
+        setTimeLeft('⏳')
+        return
       }
 
-      if (remainingMs === 0 && status.last_updated) {
-        const lastScrapeTime = new Date(status.last_updated).getTime()
-        const timeSinceScrape = Math.max(0, now - lastScrapeTime)
-        remainingMs = intervalMs - (timeSinceScrape % intervalMs)
+      // Use server-computed next_run_seconds to avoid clock skew
+      if (status.next_run_seconds !== undefined && status.next_run_seconds !== null && status.next_run_seconds > 0) {
+        const elapsedSinceFetch = Math.floor((Date.now() - status.fetchedAt) / 1000)
+        const remainingS = Math.max(0, status.next_run_seconds - elapsedSinceFetch)
+        const m = Math.floor(remainingS / 60)
+        const s = remainingS % 60
+        setTimeLeft(`${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`)
+      } else {
+        setTimeLeft('00:00')
       }
-
-      const totalSeconds = Math.floor(remainingMs / 1000)
-      const m = Math.floor(totalSeconds / 60)
-      const s = totalSeconds % 60
-      setTimeLeft(`${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`)
     }, 1000)
 
     return () => clearInterval(timerInterval)
@@ -93,7 +90,9 @@ export default function ScrapeTimer() {
       </span>
 
       <div className="bg-blue-900/10 border border-blue-900/40 px-3 py-1.5 rounded-lg flex items-center gap-2">
-        <span className="text-[9px] text-blue-400/80 uppercase font-bold tracking-wider">Next cycle in:</span>
+        <span className="text-[9px] text-blue-400/80 uppercase font-bold tracking-wider">
+          {isRunning ? 'Scraping' : 'Next cycle in:'}
+        </span>
         <span className="text-xs font-mono text-blue-300 font-bold w-10 text-center">{timeLeft}</span>
       </div>
     </div>

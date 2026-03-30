@@ -506,7 +506,8 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
             "interval_mins": interval_mins,
             "current_activity": status_val.get('current_activity'),
             "instance": status_val.get('instance', 'Unknown'),
-            "logs": status_val.get('logs', [])
+            "logs": status_val.get('logs', []),
+            "kol_timings": status_val.get('kol_timings', {})
         }
     finally:
         release_db(db)

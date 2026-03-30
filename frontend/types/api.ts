@@ -13,6 +13,7 @@ export interface ScrapeStatus {
   next_run_seconds?: number
   interval_mins?: number
   logs: string[]
+  kol_timings?: Record<string, { started_at: string; elapsed_s: number | null; posts: number | null; error?: string }>
 }
 
 export interface KOL {

@@ -15,6 +15,21 @@ import os
 from db import get_db, release_db
 from config import SCRAPE_INTERVAL
 
+# Logging filter: only print logs for specific user if LOG_USER_ID is set
+_LOG_USER_ID = os.getenv("LOG_USER_ID")
+
+def should_log(user_id=None):
+    """Returns True if we should log this message (based on LOG_USER_ID env var)."""
+    if not _LOG_USER_ID:
+        return True  # Log all by default
+    return user_id == _LOG_USER_ID
+
+def log_print(*args, **kwargs):
+    """Print wrapper that respects LOG_USER_ID filter."""
+    user_id = kwargs.pop('user_id', None)
+    if should_log(user_id):
+        print(*args, **kwargs)
+
 def make_status_key(user_id=None):
     env_suffix = os.getenv("ENVIRONMENT_NAME", "Local").replace(" ", "_").lower()
     base = "twitter_scraper_status"
@@ -509,7 +524,7 @@ async def push_all_channels(job_filter: str = None):
     build and send embeds to their active channels concurrently.
     """
     configs = get_all_user_webhooks()
-    print(f"📡 Processing Discord push (Filter: {job_filter or 'All'}) for {len(configs)} user(s)...")
+    log_print(f"📡 Processing Discord push (Filter: {job_filter or 'All'}) for {len(configs)} user(s)...")
     tasks = []
     for config in configs:
         user_id = str(config["user_id"])
@@ -543,13 +558,13 @@ async def push_all_channels(job_filter: str = None):
                         "footer": {"text": f"Scrape Interval: {user_interval}m | Check Complete"}
                     }]))
             except Exception as e:
-                print(f"⚠️ Error building {webhook_key} for {user_id}: {e}")
+                log_print(f"⚠️ Error building {webhook_key} for {user_id}: {e}", user_id=user_id)
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-        print(f"✅ Sent {len(tasks)} Discord webhook batch(es)")
+        log_print(f"✅ Sent {len(tasks)} Discord webhook batch(es)")
     else:
-        print("ℹ️ No data to push to Discord for this filter")
+        log_print("ℹ️ No data to push to Discord for this filter")
 
 
 if __name__ == "__main__":
