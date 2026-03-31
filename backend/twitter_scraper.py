@@ -773,5 +773,445 @@ async def main():
     finally:
         release_db(db)
 
+def make_newposts_status_key(user_id=None):
+    env_suffix = os.getenv("ENVIRONMENT_NAME", "Local").replace(" ", "_").lower()
+    base = "twitter_newposts_status"
+    if env_suffix:
+        base = f"{base}_{env_suffix}"
+    if user_id:
+        base = f"{base}_{user_id}"
+    return base
+
+def update_newposts_status(db, message, user_id=None, extra=None):
+    """Update the new posts scrape status in system_status table."""
+    try:
+        cur = db.cursor()
+        key = make_newposts_status_key(user_id)
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (key,))
+        row = cur.fetchone()
+        status = row[0] if row else {}
+        status['current_activity'] = message
+        if extra:
+            status.update(extra)
+        logs = status.get('logs', [])
+        if not logs or logs[-1] != f"[{datetime.now().strftime('%H:%M:%S')}] {message}":
+            logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+            status['logs'] = logs[-50:]
+        cur.execute("""
+            INSERT INTO system_status (key, value, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, (key, json.dumps(status)))
+        db.commit()
+    except Exception as e:
+        print(f"⚠️ Failed to update new posts status: {e}")
+
+
+async def scrape_newposts_profile(page, kol_id, name, url, db, sync_time, cutoff_time, user_id=None):
+    """Quick scrape: only find posts within the last 30 minutes. Stop at first old post."""
+    start_ts = datetime.now(timezone.utc)
+    username = get_twitter_username(url)
+    if not username:
+        log_print(f"  ⚠️ Could not extract username from {url}", user_id=user_id)
+        return []
+
+    log_print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔎 Quick scan {name} (@{username}) for posts since {cutoff_time.strftime('%H:%M')}", user_id=user_id)
+
+    today = sync_time.date()
+    tomorrow = today + timedelta(days=1)
+    search_url = f"https://x.com/search?q=from%3A{username}%20since%3A{today.isoformat()}%20until%3A{tomorrow.isoformat()}&src=typed_query&f=live"
+
+    # Longer pre-navigation pause to avoid rate limits on search
+    await page.wait_for_timeout(random.randint(2000, 4000))
+    await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+
+    try:
+        await page.wait_for_selector(
+            'article[data-testid="tweet"], [data-testid="emptyState"]',
+            timeout=12000
+        )
+    except:
+        content = await page.content()
+        content_lower = content.lower()
+        if "rate limit" in content_lower or "something went wrong" in content_lower:
+            log_print(f"  ⚠️ Rate limited for {name}, will retry after cooldown", user_id=user_id)
+            return "rate_limited"
+        # Could be slow page load, not necessarily rate limit
+        page_text = await page.inner_text('body') if await page.query_selector('body') else ''
+        if 'something went wrong' in page_text.lower():
+            log_print(f"  ⚠️ Error page for {name}", user_id=user_id)
+            return "rate_limited"
+    await page.wait_for_timeout(1000)
+
+    empty = await page.query_selector('[data-testid="emptyState"]')
+    if empty:
+        log_print(f"  🧭 {name}: no posts today", user_id=user_id)
+        return []
+
+    new_posts = []
+    seen_ids = set()
+    stale = 0
+    last_count = 0
+    hit_old_post = False
+
+    for _ in range(50):  # limited scrolling for quick scan
+        articles = await page.query_selector_all('article[data-testid="tweet"]')
+        for tweet in articles:
+            link = await tweet.query_selector('a[href*="/status/"]')
+            if not link:
+                continue
+            href = await link.get_attribute('href')
+            if not href:
+                continue
+            tid = href.split('/')[-1]
+            post_id = f"tw_{tid}"
+            if post_id in seen_ids:
+                continue
+            seen_ids.add(post_id)
+
+            time_el = await tweet.query_selector('time')
+            posted_at = await time_el.get_attribute('datetime') if time_el else None
+            if not posted_at:
+                continue
+
+            # Check if this post is within our 30-minute window
+            try:
+                post_time = datetime.fromisoformat(posted_at.replace('Z', '+00:00'))
+            except:
+                continue
+
+            if post_time < cutoff_time:
+                # First post older than 30 minutes - stop this KOL
+                log_print(f"  ⏹️  {name}: hit post from {post_time.strftime('%H:%M')} (older than cutoff {cutoff_time.strftime('%H:%M')}), stopping", user_id=user_id)
+                hit_old_post = True
+                break
+
+            # Extract engagement metrics (same as full scrape)
+            likes = '0'; reposts = '0'; replies = '0'; bookmarks = '0'; views = '0'
+            group = await tweet.query_selector('[role="group"]')
+            if group:
+                aria = await group.get_attribute('aria-label')
+                if aria:
+                    replies_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+repl(?:y|ies)', aria, re.I)
+                    reposts_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+repost(?:s)?', aria, re.I)
+                    likes_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+like(?:s)?', aria, re.I)
+                    bookmarks_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+bookmark(?:s)?', aria, re.I)
+                    views_match = re.search(r'([\d.,]+(?:[KMkm]?))\s+view(?:s)?', aria, re.I)
+                    if replies_match: replies = replies_match.group(1)
+                    if reposts_match: reposts = reposts_match.group(1)
+                    if likes_match: likes = likes_match.group(1)
+                    if bookmarks_match: bookmarks = bookmarks_match.group(1)
+                    if views_match: views = views_match.group(1)
+                else:
+                    # Fallback: button aria-labels
+                    btn_map = {
+                        'reply': ('replies', r'([\d.,]+[KMkm]?)'),
+                        'retweet': ('reposts', r'([\d.,]+[KMkm]?)'),
+                        'like': ('likes', r'([\d.,]+[KMkm]?)'),
+                        'bookmark': ('bookmarks', r'([\d.,]+[KMkm]?)'),
+                    }
+                    for testid, (metric, pat) in btn_map.items():
+                        btn = await group.query_selector(f'button[data-testid="{testid}"]')
+                        if btn:
+                            btn_aria = await btn.get_attribute('aria-label') or ''
+                            m = re.search(pat, btn_aria)
+                            if m:
+                                val = m.group(1)
+                                if testid == 'reply': replies = val
+                                elif testid == 'retweet': reposts = val
+                                elif testid == 'like': likes = val
+                                elif testid == 'bookmark': bookmarks = val
+
+            if views == '0':
+                views_el = await tweet.query_selector('a[href*="/analytics"]')
+                if views_el:
+                    views_aria = await views_el.get_attribute('aria-label') or ''
+                    views_m = re.search(r'([\d.,]+[KMkm]?)', views_aria)
+                    if views_m:
+                        views = views_m.group(1)
+                if views == '0':
+                    views_span = await tweet.query_selector('a[href*="/analytics"] span span')
+                    if views_span:
+                        views_text = (await views_span.inner_text()).strip()
+                        if views_text and views_text != '0':
+                            views = views_text
+
+            tweet_text_el = await tweet.query_selector('div[data-testid="tweetText"]')
+            tweet_text = await tweet_text_el.inner_text() if tweet_text_el else ''
+            tweet_url = "https://x.com" + href
+
+            post_data = {
+                'post_id': post_id,
+                'url': tweet_url,
+                'content': tweet_text,
+                'posted_at': posted_at,
+                'likes': parse_count(likes),
+                'reposts': parse_count(reposts),
+                'comments': parse_count(replies),
+                'bookmarks': parse_count(bookmarks),
+                'views': parse_count(views)
+            }
+            new_posts.append(post_data)
+
+        if hit_old_post:
+            break
+
+        if len(new_posts) == last_count:
+            stale += 1
+        else:
+            stale = 0
+        last_count = len(new_posts)
+
+        if stale >= 3:
+            break
+
+        await page.evaluate("window.scrollBy(0, 1500)")
+        await page.wait_for_timeout(random.randint(700, 1200))
+
+    # Save new posts to DB
+    if new_posts:
+        cur = db.cursor()
+        inserted = 0
+        for item in new_posts:
+            try:
+                cur.execute("""
+                    INSERT INTO twitter_posts (
+                        kol_id, post_id, content, likes, reposts, comments, bookmarks, views, post_url, posted_at,
+                        first_captured_at, captured_at,
+                        last_likes, last_reposts, last_comments, last_bookmarks, last_views
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (post_id) DO UPDATE SET
+                        likes = GREATEST(EXCLUDED.likes, twitter_posts.likes),
+                        reposts = GREATEST(EXCLUDED.reposts, twitter_posts.reposts),
+                        comments = GREATEST(EXCLUDED.comments, twitter_posts.comments),
+                        bookmarks = GREATEST(EXCLUDED.bookmarks, twitter_posts.bookmarks),
+                        views = GREATEST(EXCLUDED.views, twitter_posts.views),
+                        captured_at = EXCLUDED.captured_at
+                """, (
+                    kol_id, item['post_id'], item['content'], item['likes'], item['reposts'], item['comments'], item['bookmarks'], item['views'],
+                    item['url'], item['posted_at'], sync_time, sync_time,
+                    item['likes'], item['reposts'], item['comments'], item['bookmarks'], item['views']
+                ))
+                inserted += 1
+            except Exception:
+                pass
+        cur.execute("UPDATE kols SET updated_at = %s WHERE id = %s", (sync_time, kol_id))
+        db.commit()
+        log_print(f"  ✅ {name}: {inserted} new posts saved", user_id=user_id)
+
+    elapsed = (datetime.now(timezone.utc) - start_ts).total_seconds()
+    log_print(f"  ✅ Quick scan {name} done in {elapsed:.1f}s: {len(new_posts)} posts within window", user_id=user_id)
+    return new_posts
+
+
+async def main_newposts():
+    """Quick scrape mode: only find posts within the last 30 minutes for each KOL."""
+    db = get_db()
+    sync_time = datetime.now(timezone.utc)
+    cutoff_time = sync_time - timedelta(minutes=30)
+    all_new_posts = []
+
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT DISTINCT user_id FROM kols WHERE status = 'active'")
+        users = [str(r['user_id']) for r in cur.fetchall()]
+
+        limit_users_env = os.getenv("LIMIT_TO_USER_IDS")
+        limit_user = os.getenv("LIMIT_TO_USER_ID")
+        target_users = None
+        if limit_users_env:
+            target_users = [u.strip() for u in limit_users_env.split(",") if u.strip()]
+        elif limit_user:
+            target_users = [limit_user]
+        if target_users:
+            filtered = [u for u in users if u in target_users]
+            if not filtered:
+                print(f"⚠️ No active KOLs found for specified users. Skipping new posts scrape.")
+                return
+            users = filtered
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=HEADLESS, args=['--no-sandbox'])
+
+            for user_id in users:
+                log_print(f"--- Starting New Posts Scan for User ID: {user_id} ---", user_id=user_id)
+
+                cur.execute("SELECT twitter_auth_token, twitter_ct0 FROM user_configs WHERE user_id = %s", (user_id,))
+                config_row = cur.fetchone()
+                if not config_row or not config_row.get('twitter_auth_token'):
+                    log_print(f"⚠️ User {user_id}: No X cookies configured. Skipping.", user_id=user_id)
+                    continue
+
+                user_auth = config_row['twitter_auth_token']
+                user_ct0 = config_row['twitter_ct0']
+
+                context = await browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36')
+                await context.add_cookies([
+                    {'name': 'auth_token', 'value': user_auth, 'domain': '.x.com', 'path': '/'},
+                    {'name': 'ct0', 'value': user_ct0, 'domain': '.x.com', 'path': '/'}
+                ])
+
+                page = await context.new_page()
+                try:
+                    await page.goto("https://x.com", wait_until="domcontentloaded", timeout=30000)
+                    if "login" in page.url:
+                        log_print(f"❌ User {user_id}: Twitter/X login failed!", user_id=user_id)
+                        update_newposts_status(db, f"❌ Login failed", user_id)
+                        await context.close()
+                        continue
+                    log_print(f"✅ User {user_id}: Login OK", user_id=user_id)
+                    await page.close()
+
+                    cur2 = db.cursor()
+                    cur2.execute("""
+                        SELECT k.id, k.name, k.twitter_url
+                        FROM kols k
+                        WHERE k.status = 'active' AND k.user_id = %s
+                        ORDER BY k.name
+                    """, (user_id,))
+                    kols = cur2.fetchall()
+                    total_kols = len(kols)
+                    scraped_count = 0
+                    user_new_posts = []
+
+                    update_newposts_status(db, f"Scanning {total_kols} KOLs for new posts...", user_id, extra={
+                        'is_running': True,
+                        'total_kols': total_kols,
+                        'scraped_count': 0,
+                        'current_kol': None,
+                        'last_start_at': sync_time.isoformat(),
+                        'cutoff_time': cutoff_time.isoformat()
+                    })
+
+                    consecutive_rate_limits = 0
+                    for idx, (kol_id, name, url) in enumerate(kols, start=1):
+                        try:
+                            update_newposts_status(db, f"Scanning {name}...", user_id, extra={
+                                'is_running': True,
+                                'total_kols': total_kols,
+                                'scraped_count': scraped_count,
+                                'current_kol': name
+                            })
+
+                            kol_page = await context.new_page()
+                            found = await asyncio.wait_for(
+                                scrape_newposts_profile(kol_page, kol_id, name, url, db, sync_time, cutoff_time, user_id=user_id),
+                                timeout=120
+                            )
+                            await kol_page.close()
+
+                            # Handle rate limiting with context rotation
+                            if found == "rate_limited":
+                                consecutive_rate_limits += 1
+                                if consecutive_rate_limits >= 3:
+                                    log_print(f"  🔄 {consecutive_rate_limits} consecutive rate limits — rotating context and cooling down 60s...", user_id=user_id)
+                                    await context.close()
+                                    await asyncio.sleep(60)
+                                    context = await browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36')
+                                    await context.add_cookies([
+                                        {'name': 'auth_token', 'value': user_auth, 'domain': '.x.com', 'path': '/'},
+                                        {'name': 'ct0', 'value': user_ct0, 'domain': '.x.com', 'path': '/'}
+                                    ])
+                                    consecutive_rate_limits = 0
+                                else:
+                                    await asyncio.sleep(random.randint(15, 25))
+                                found = []
+                            else:
+                                consecutive_rate_limits = 0
+
+                            for post in found:
+                                post['kol_name'] = name
+                            user_new_posts.extend(found)
+
+                            scraped_count = idx
+                            update_newposts_status(db, f"Finished {name} ({len(found)} new)", user_id, extra={
+                                'is_running': True,
+                                'total_kols': total_kols,
+                                'scraped_count': scraped_count,
+                                'current_kol': None
+                            })
+
+                        except asyncio.TimeoutError:
+                            log_print(f"  ⏰ Timeout scanning {name}, skipping", user_id=user_id)
+                            scraped_count = idx
+                            try: await kol_page.close()
+                            except: pass
+                        except Exception as e:
+                            log_print(f"  ❌ Error scanning {name}: {e}", user_id=user_id)
+                            scraped_count = idx
+                            try: await kol_page.close()
+                            except: pass
+
+                        # Inter-KOL delay to respect rate limits
+                        await asyncio.sleep(random.randint(8, 15))
+
+                except Exception as e:
+                    log_print(f"❌ User {user_id}: Critical error: {e}", user_id=user_id)
+                    update_newposts_status(db, f"❌ Error: {e}", user_id)
+
+                await context.close()
+
+                # Store results summary in status
+                update_newposts_status(db, f"Scan complete: {len(user_new_posts)} new posts from {total_kols} KOLs", user_id, extra={
+                    'is_running': False,
+                    'total_kols': total_kols,
+                    'scraped_count': scraped_count,
+                    'current_kol': None,
+                    'finished_at': datetime.now(timezone.utc).isoformat(),
+                    'new_posts_count': len(user_new_posts),
+                    'new_posts': [
+                        {
+                            'kol_name': p['kol_name'],
+                            'post_id': p['post_id'],
+                            'content': (p['content'] or '')[:200],
+                            'posted_at': p['posted_at'],
+                            'scraped_at': sync_time.isoformat(),
+                            'post_url': p['url'],
+                            'likes': p['likes'],
+                            'reposts': p['reposts'],
+                            'comments': p['comments'],
+                            'views': p['views'],
+                            'bookmarks': p['bookmarks']
+                        } for p in user_new_posts
+                    ]
+                })
+                all_new_posts.extend(user_new_posts)
+                log_print(f"--- Finished New Posts Scan for User ID: {user_id}: {len(user_new_posts)} new posts ---", user_id=user_id)
+
+                # Push to Discord directly after storing results
+                try:
+                    from discord_push import build_newposts_embeds, send_embeds
+                    cur_wh = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                    cur_wh.execute("SELECT discord_webhook_posts FROM user_configs WHERE user_id = %s", (user_id,))
+                    wh_row = cur_wh.fetchone()
+                    webhook_url = wh_row.get('discord_webhook_posts') if wh_row else None
+                    if webhook_url:
+                        embeds = build_newposts_embeds(user_id)
+                        if embeds:
+                            await send_embeds(webhook_url, embeds)
+                            log_print(f"  📤 Pushed {len(embeds)} new post(s) to Discord for user {user_id}", user_id=user_id)
+                        else:
+                            await send_embeds(webhook_url, [{
+                                "title": "📝 New Posts Scan Complete",
+                                "description": "No new posts found in the past 30 minutes.",
+                                "color": 0x2C2F33,
+                                "footer": {"text": "New Posts Scan (30-min window)"}
+                            }])
+                            log_print(f"  📤 No new posts, sent empty notification to Discord for user {user_id}", user_id=user_id)
+                    else:
+                        log_print(f"  ⚠️ No discord_webhook_posts configured for user {user_id}", user_id=user_id)
+                except Exception as e:
+                    log_print(f"  ❌ Discord push error for user {user_id}: {e}", user_id=user_id)
+
+            await browser.close()
+    finally:
+        release_db(db)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    mode = sys.argv[1] if len(sys.argv) > 1 else "full"
+    if mode == "newposts":
+        asyncio.run(main_newposts())
+    else:
+        asyncio.run(main())

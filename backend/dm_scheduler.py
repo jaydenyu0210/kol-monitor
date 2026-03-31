@@ -55,20 +55,28 @@ async def main():
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         # Fetch KOLs scheduled for today whose time has passed, but haven't been sent a DM today
+        # dm_day supports comma-separated days (e.g. "Tuesday,Sunday")
         cur.execute("""
             SELECT k.*, k.user_id as u_id
             FROM kols k
             WHERE k.status = 'active'
             AND k.dm_text IS NOT NULL AND k.dm_text != ''
-            AND k.dm_day = %s
+            AND k.dm_day IS NOT NULL AND k.dm_day != ''
+            AND k.dm_time IS NOT NULL AND k.dm_time != ''
             AND k.dm_time <= %s
             AND k.id NOT IN (
-                SELECT kol_id FROM dm_logs 
+                SELECT kol_id FROM dm_logs
                 WHERE DATE(sent_at) = CURRENT_DATE AND status = 'sent' AND direction = 'outbound'
             )
-        """, (current_day, current_time_str))
+        """, (current_time_str,))
+
+        # Filter: current day must be in the KOL's comma-separated dm_day list
+        all_pending = cur.fetchall()
+        pending_dms = [
+            dm for dm in all_pending
+            if current_day in [d.strip() for d in (dm.get('dm_day') or '').split(',')]
+        ]
         
-        pending_dms = cur.fetchall()
         if not pending_dms:
             print("✅ No pending scheduled DMs for this time window.")
             return

@@ -2,13 +2,14 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { 
-  LayoutDashboard, 
-  Activity, 
-  Hash, 
-  Users, 
+import {
+  LayoutDashboard,
+  Activity,
+  Hash,
+  Users,
   Settings,
-  MessageSquare
+  MessageSquare,
+  Mail
 } from 'lucide-react'
 
 export default function DashboardNav() {
@@ -19,6 +20,7 @@ export default function DashboardNav() {
     { href: '/metrics', label: 'Metrics', icon: <Activity className="w-4 h-4" /> },
     { href: '/heatmap', label: 'Heatmap', icon: <Hash className="w-4 h-4" /> },
     { href: '/kols', label: 'KOLs', icon: <Users className="w-4 h-4" /> },
+    { href: '/dm-scheduler', label: 'DM Scheduler', icon: <Mail className="w-4 h-4" /> },
     { href: '/settings', label: 'Settings', icon: <Settings className="w-4 h-4" /> },
   ]
 

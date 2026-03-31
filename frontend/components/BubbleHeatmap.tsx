@@ -13,7 +13,7 @@ import {
   LogarithmicScale
 } from 'chart.js'
 import { Bubble } from 'react-chartjs-2'
-import { BarChart2, Loader2, RefreshCw, CheckCircle2, Clock, Radio, Timer, AlertCircle } from 'lucide-react'
+import { BarChart2, Loader2, RefreshCw, CheckCircle2, Clock, Radio, Timer, AlertCircle, Play } from 'lucide-react'
 
 ChartJS.register(
   LinearScale,
@@ -173,6 +173,23 @@ export default function BubbleHeatmap() {
   const isScrapeActive = isRunning || scrapedKolIds.size > 0
   const scrapeStartAt = scrapeStatus?.last_start_at ? new Date(scrapeStatus.last_start_at).getTime() : null
 
+  // Manual scrape button cooldown: disabled for 30 min after heatmap_finished_at
+  const COOLDOWN_MINS = 30
+  const finishedAt = scrapeStatus?.heatmap_finished_at ? new Date(scrapeStatus.heatmap_finished_at).getTime() : null
+  const cooldownRemaining = finishedAt ? Math.max(0, COOLDOWN_MINS * 60 * 1000 - (Date.now() - finishedAt)) : 0
+  const isOnCooldown = cooldownRemaining > 0
+  const cooldownMins = Math.ceil(cooldownRemaining / 60000)
+  const canTrigger = !isRunning && !isOnCooldown
+
+  const handleManualScrape = async () => {
+    if (!canTrigger) return
+    try {
+      await api.triggerManualScrape()
+    } catch (err) {
+      console.error('Failed to trigger scrape', err)
+    }
+  }
+
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex items-center justify-between">
@@ -191,11 +208,27 @@ export default function BubbleHeatmap() {
               <Loader2 className="w-3 h-3 animate-spin" />
               Live Scraping {scrapeStatus?.current_kol || ''} ({scrapedCount}/{totalKols})
             </span>
+          ) : isOnCooldown ? (
+            <span className="text-[10px] text-slate-500 bg-slate-800/60 border border-slate-700 px-3 py-1.5 rounded-lg font-bold flex items-center gap-1.5">
+              <Clock className="w-3 h-3" />
+              Cooldown: {cooldownMins}m remaining
+            </span>
           ) : (
             <span className="text-[10px] text-slate-400 bg-slate-800/60 border border-slate-700 px-3 py-1.5 rounded-lg font-bold">
-              Idle · auto-refresh each cycle
+              Ready to scrape
             </span>
           )}
+          <button
+            onClick={handleManualScrape}
+            disabled={!canTrigger}
+            className={`flex items-center gap-2 text-[10px] font-bold px-3 py-1.5 rounded-lg border transition-all ${
+              canTrigger
+                ? 'bg-blue-600 border-blue-500 text-white hover:bg-blue-500 cursor-pointer'
+                : 'bg-slate-800/50 border-slate-700 text-slate-600 cursor-not-allowed'
+            }`}
+          >
+            <Play className="w-3 h-3" /> Scrape Heatmap
+          </button>
           <button
             onClick={() => fetchPosts()}
             className="flex items-center gap-2 text-[10px] font-bold px-3 py-1.5 rounded-lg bg-[#1e293b] border border-[#334155] text-slate-300 hover:border-blue-500/40 transition-all"

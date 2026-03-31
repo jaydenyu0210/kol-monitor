@@ -61,5 +61,17 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(data)
   }),
-  getScrapeStatus: () => clientFetch<any>('/api/scrape_status')
+  getScrapeStatus: () => clientFetch<any>('/api/scrape_status'),
+  getNewPostsScrapeStatus: () => clientFetch<any>('/api/newposts_scrape_status'),
+  triggerManualScrape: () => clientFetch<any>('/api/trigger_manual_scrape', { method: 'POST' }),
+  pushNewPostsToDiscord: () => clientFetch<any>('/api/discord/push', {
+    method: 'POST',
+    body: JSON.stringify({ channel: 'newposts' })
+  }),
+  getDMLogs: () => clientFetch<{ logs: any[] }>('/api/dm_logs'),
+  saveDMSchedules: (schedules: { kol_id: number, dm_text: string | null, dm_day: string | null, dm_time: string | null }[]) =>
+    clientFetch<any>('/api/dm_schedules', {
+      method: 'POST',
+      body: JSON.stringify({ schedules })
+    })
 }

@@ -2,23 +2,28 @@
 
 import { useState, useEffect } from 'react'
 import { api } from '@/lib/api-client'
-import { 
-  MessageSquare, 
-  Flame, 
-  Zap, 
+import { NewPostsScrapeStatus } from '@/types/api'
+import {
+  Flame,
+  Zap,
   ExternalLink,
-  Clock,
-  Loader2
+  Loader2,
+  Radio
 } from 'lucide-react'
 
 export default function DiscordFeed() {
   const [data, setData] = useState<any>(null)
+  const [newPostsStatus, setNewPostsStatus] = useState<NewPostsScrapeStatus | null>(null)
   const [loading, setLoading] = useState(true)
 
   const fetchData = async () => {
     try {
-      const result = await api.getOverviewFeed()
+      const [result, npStatus] = await Promise.all([
+        api.getOverviewFeed(),
+        api.getNewPostsScrapeStatus()
+      ])
       setData(result)
+      setNewPostsStatus(npStatus)
     } catch (err) {
       console.error('Failed to fetch Discord feed', err)
     } finally {
@@ -45,47 +50,48 @@ export default function DiscordFeed() {
     return str.length > len ? str.substring(0, len) + '...' : str
   }
 
-  const formatDelta = (val: number) => (val > 0 ? `+${val.toLocaleString()}` : val.toLocaleString())
-
-  const formatRange = (meta: any) => {
-    if (!meta?.start_time || !meta?.end_time) return ""
-    const s = new Date(meta.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })
-    const e = new Date(meta.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })
-    return `from ${s} to ${e}`
-  }
-
-  const recentPosts = data?.recent_posts?.items || (Array.isArray(data?.recent_posts) ? data.recent_posts : [])
-  const recentMeta = data?.recent_posts?.metadata
   const hotPosts = data?.hot_posts?.items || (Array.isArray(data?.hot_posts) ? data.hot_posts : [])
   const interactions = data?.interactions?.items || (Array.isArray(data?.interactions) ? data.interactions : [])
 
+  // New posts from the 30-min quick scan
+  const newPosts = newPostsStatus?.new_posts || []
+  const npIsRunning = !!newPostsStatus?.is_running
+  const npFinished = newPostsStatus?.finished_at
+
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      
-      {/* 1. New X Posts */}
-      <div className="bg-[#1e293b] border border-[#334155] rounded-xl p-5 border-t-2 border-t-blue-500 shadow-xl">
+
+      {/* 1. New Posts (30-min scan) */}
+      <div className="bg-[#1e293b] border border-[#334155] rounded-xl p-5 border-t-2 border-t-green-500 shadow-xl">
         <div className="flex justify-between items-center mb-4">
           <h3 className="font-bold text-lg text-white flex items-center">
-            <MessageSquare className="w-5 h-5 mr-2 text-blue-400" /> New X Posts
+            <Radio className="w-5 h-5 mr-2 text-green-400" /> New Posts (30-min Scan)
           </h3>
-          {recentMeta && (
-            <span className="text-[10px] text-slate-500 font-mono bg-[#0f172a] px-2 py-1 rounded border border-[#334155]">
-              Interval: {formatRange(recentMeta)}
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {npIsRunning ? (
+              <span className="text-[10px] text-green-300 bg-green-500/10 border border-green-500/30 px-2 py-1 rounded font-bold flex items-center gap-1.5 animate-pulse">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Scanning {newPostsStatus?.current_kol || '...'} ({newPostsStatus?.scraped_count}/{newPostsStatus?.total_kols})
+              </span>
+            ) : npFinished ? (
+              <span className="text-[10px] text-slate-500 font-mono bg-[#0f172a] px-2 py-1 rounded border border-[#334155]">
+                Last scan: {new Date(npFinished).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {newPosts.length} found
+              </span>
+            ) : null}
+          </div>
         </div>
         <div className="space-y-3 max-h-[600px] overflow-y-auto scrollbar-thin pr-2">
-           {recentPosts.length > 0 ? (
-             recentPosts.map((p: any, i: number) => (
-               <div key={i} className="bg-[#0f172a]/40 p-3 rounded-lg border border-[#334155]/60 hover:border-blue-500/30 transition-all">
+           {newPosts.length > 0 ? (
+             newPosts.map((p: any, i: number) => (
+               <div key={i} className="bg-[#0f172a]/40 p-3 rounded-lg border border-[#334155]/60 hover:border-green-500/30 transition-all">
                  <div className="flex justify-between items-center mb-2">
-                   <span className="text-blue-400 font-bold text-sm">{p.kol || 'KOL'}</span>
+                   <span className="text-green-400 font-bold text-sm">{p.kol_name || 'KOL'}</span>
                    <div className="flex flex-col text-right">
                      <span className="text-[9px] text-slate-500 uppercase tracking-tighter">
                        Posted: {new Date(p.posted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                      </span>
-                     <span className="text-[9px] text-slate-400 uppercase tracking-tighter font-semibold">
-                       Scraped: {new Date(p.captured_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                     <span className="text-[9px] text-green-400/70 uppercase tracking-tighter font-semibold">
+                       Scraped: {new Date(p.scraped_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                      </span>
                    </div>
                  </div>
@@ -105,8 +111,12 @@ export default function DiscordFeed() {
              ))
            ) : (
              <div className="text-center py-12 px-4 bg-[#0f172a]/20 rounded-xl border border-dashed border-[#334155]">
-               <p className="text-sm text-slate-500 italic mb-1">No new posts found</p>
-               <p className="text-[10px] text-slate-600 font-mono italic">{formatRange(recentMeta)}</p>
+               <p className="text-sm text-slate-500 italic mb-1">No new posts in the last 30 minutes</p>
+               {npFinished && (
+                 <p className="text-[10px] text-slate-600 font-mono italic">
+                   Last scanned at {new Date(npFinished).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                 </p>
+               )}
              </div>
            )}
         </div>

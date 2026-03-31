@@ -39,6 +39,15 @@ def make_status_key(user_id=None):
         base = f"{base}_{user_id}"
     return base
 
+def make_newposts_status_key(user_id=None):
+    env_suffix = os.getenv("ENVIRONMENT_NAME", "Local").replace(" ", "_").lower()
+    base = "twitter_newposts_status"
+    if env_suffix:
+        base = f"{base}_{env_suffix}"
+    if user_id:
+        base = f"{base}_{user_id}"
+    return base
+
 
 def update_feed_cache(user_id, feed_type, items, max_items=50, overwrite=False, metadata=None):
     """Write recent items to a JSON file, mirroring the Discord history."""
@@ -202,6 +211,59 @@ def build_post_embeds(user_id: str, interval_mins: int = SCRAPE_INTERVAL):
                 "url": p.get("post_url", ""),
                 "timestamp": (p.get("posted_at") or datetime.now(timezone.utc)).isoformat(),
                 "footer": {"text": f"Scrape Interval: {interval_mins}m"}
+            })
+        return embeds
+    finally:
+        release_db(db)
+
+
+def build_newposts_embeds(user_id: str, interval_mins: int = 30):
+    """Build embeds from the new posts quick scan results stored in system_status."""
+    db = get_db()
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        key = make_newposts_status_key(user_id)
+        print(f"  [DEBUG build_newposts_embeds] Reading key={key} for user={user_id}", flush=True)
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (key,))
+        row = cur.fetchone()
+        status_val = row['value'] if row and row['value'] else {}
+
+        new_posts = status_val.get('new_posts', [])
+        scrape_start = status_val.get('last_start_at', '')
+        print(f"  [DEBUG build_newposts_embeds] Found {len(new_posts)} new_posts, last_start_at={scrape_start}, status keys={list(status_val.keys())}", flush=True)
+
+        if not new_posts:
+            return []
+
+        embeds = []
+        for p in new_posts:
+            posted_str = p.get('posted_at', '')
+            scraped_str = p.get('scraped_at', scrape_start)
+            try:
+                posted_time = datetime.fromisoformat(posted_str.replace('Z', '+00:00')).strftime('%H:%M')
+            except:
+                posted_time = 'unknown'
+            try:
+                scraped_time = datetime.fromisoformat(scraped_str.replace('Z', '+00:00')).strftime('%H:%M')
+            except:
+                scraped_time = 'unknown'
+
+            content_preview = (p.get('content') or '')[:300]
+            embeds.append({
+                "title": f"📝 {p.get('kol_name', 'KOL')} posted",
+                "description": content_preview,
+                "color": 0x1DA1F2,
+                "fields": [
+                    {"name": "👍 Likes", "value": str(p.get("likes", 0)), "inline": True},
+                    {"name": "💬 Replies", "value": str(p.get("comments", 0)), "inline": True},
+                    {"name": "🔄 Reposts", "value": str(p.get("reposts", 0)), "inline": True},
+                    {"name": "👀 Views", "value": str(p.get("views", 0)), "inline": True},
+                    {"name": "🕐 Posted", "value": posted_time, "inline": True},
+                    {"name": "🔍 Scraped", "value": scraped_time, "inline": True},
+                ],
+                "url": p.get("post_url", ""),
+                "timestamp": posted_str if posted_str else datetime.now(timezone.utc).isoformat(),
+                "footer": {"text": "New Posts Scan (30-min window)"}
             })
         return embeds
     finally:
@@ -535,6 +597,27 @@ async def push_all_channels(job_filter: str = None):
         if limit_user and user_id != limit_user:
             continue
 
+        # Handle "newposts" filter: push new posts scan results to the posts webhook
+        if job_filter == "newposts":
+            webhook_url = config.get("discord_webhook_posts")
+            log_print(f"  [DEBUG push_all_channels] newposts filter for user={user_id}, webhook_url={'SET' if webhook_url else 'NONE'}")
+            if webhook_url:
+                try:
+                    embeds = build_newposts_embeds(user_id)
+                    if embeds:
+                        tasks.append(send_embeds(webhook_url, embeds))
+                        log_print(f"  📤 Pushing {len(embeds)} new post embeds to Discord for {user_id}", user_id=user_id)
+                    else:
+                        tasks.append(send_embeds(webhook_url, [{
+                            "title": "📝 New Posts Scan Complete",
+                            "description": "No new posts found in the past 30 minutes.",
+                            "color": 0x2C2F33,
+                            "footer": {"text": "New Posts Scan (30-min window)"}
+                        }]))
+                except Exception as e:
+                    log_print(f"⚠️ Error building newposts for {user_id}: {e}", user_id=user_id)
+            continue  # Skip the regular channel map for newposts filter
+
         for webhook_key, build_fn in CHANNEL_MAP.items():
             # If a filter is provided (e.g., 'posts'), only process that channel
             if job_filter and job_filter not in webhook_key:
@@ -545,16 +628,15 @@ async def push_all_channels(job_filter: str = None):
                 continue
 
             try:
-                embeds = build_fn(user_id, interval_mins=user_interval) if webhook_key != "discord_webhook_heatmap" else build_fn(user_id, interval_mins=user_interval)
+                embeds = build_fn(user_id, interval_mins=user_interval)
 
                 if embeds:
                     tasks.append(send_embeds(webhook_url, embeds))
                 elif webhook_key == "discord_webhook_posts" and (job_filter is None or job_filter == "posts"):
-                    # The user wants an update even if none found: "even if no new posts, say new posts"
                     tasks.append(send_embeds(webhook_url, [{
                         "title": "📝 New X Posts",
                         "description": "No new posts found in this scrape interval.",
-                        "color": 0x2C2F33, # Dark grey (Discord background flavor)
+                        "color": 0x2C2F33,
                         "footer": {"text": f"Scrape Interval: {user_interval}m | Check Complete"}
                     }]))
             except Exception as e:

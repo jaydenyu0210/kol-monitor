@@ -165,6 +165,17 @@ class KolUpdate(BaseModel):
     dm_time: Optional[str] = None
 
 
+class DMScheduleItem(BaseModel):
+    kol_id: int
+    dm_text: Optional[str] = None
+    dm_day: Optional[str] = None   # Comma-separated days: "Tuesday,Sunday"
+    dm_time: Optional[str] = None  # HH:MM:SS format
+
+
+class DMScheduleBatch(BaseModel):
+    schedules: list[DMScheduleItem]
+
+
 class WebhookSave(BaseModel):
     channel: str
     webhook_url: str
@@ -189,6 +200,15 @@ class UserConfigUpdate(BaseModel):
 def make_status_key(user_id=None):
     env_suffix = os.getenv("ENVIRONMENT_NAME", "Local").replace(" ", "_").lower()
     base = "twitter_scraper_status"
+    if env_suffix:
+        base = f"{base}_{env_suffix}"
+    if user_id:
+        base = f"{base}_{user_id}"
+    return base
+
+def make_newposts_status_key(user_id=None):
+    env_suffix = os.getenv("ENVIRONMENT_NAME", "Local").replace(" ", "_").lower()
+    base = "twitter_newposts_status"
     if env_suffix:
         base = f"{base}_{env_suffix}"
     if user_id:
@@ -501,6 +521,7 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
             "current_kol": status_val.get('current_kol'),
             "last_updated": status_val.get('last_start_at') or last_updated,
             "last_start_at": status_val.get('last_start_at'),
+            "heatmap_finished_at": status_val.get('heatmap_finished_at'),
             "next_run_seconds": next_run_seconds,
             "next_run_at": next_run_at,
             "interval_mins": interval_mins,
@@ -508,6 +529,47 @@ def get_scrape_status(user_id: str = Depends(get_current_user)):
             "instance": status_val.get('instance', 'Unknown'),
             "logs": status_val.get('logs', []),
             "kol_timings": status_val.get('kol_timings', {})
+        }
+    finally:
+        release_db(db)
+
+
+# ---------- New Posts Scrape Status ----------
+
+@app.get("/api/newposts_scrape_status")
+def get_newposts_scrape_status(user_id: str = Depends(get_current_user)):
+    db = get_db()
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        key = make_newposts_status_key(user_id)
+        cur.execute("SELECT value FROM system_status WHERE key = %s", (key,))
+        row = cur.fetchone()
+        status_val = row['value'] if row and row['value'] else {}
+
+        next_run_at = status_val.get('next_run_at')
+        next_run_seconds = 0
+        if next_run_at:
+            try:
+                nr_dt = datetime.fromisoformat(next_run_at)
+                diff = (nr_dt - datetime.now(timezone.utc)).total_seconds()
+                next_run_seconds = max(0, int(diff))
+            except:
+                pass
+
+        return {
+            "is_running": status_val.get('is_running', False),
+            "current_activity": status_val.get('current_activity'),
+            "current_kol": status_val.get('current_kol'),
+            "total_kols": status_val.get('total_kols', 0),
+            "scraped_count": status_val.get('scraped_count', 0),
+            "last_start_at": status_val.get('last_start_at'),
+            "cutoff_time": status_val.get('cutoff_time'),
+            "finished_at": status_val.get('finished_at'),
+            "next_run_at": next_run_at,
+            "next_run_seconds": next_run_seconds,
+            "new_posts_count": status_val.get('new_posts_count', 0),
+            "new_posts": status_val.get('new_posts', []),
+            "logs": status_val.get('logs', [])
         }
     finally:
         release_db(db)
@@ -658,7 +720,7 @@ async def trigger_discord_push(data: DiscordPushRequest, user_id: str = Depends(
     """Manually trigger Discord push for a specific channel or all channels."""
     from discord_push import (
         build_post_embeds, build_following_embeds, build_follower_embeds,
-        build_heatmap_embeds, build_interaction_embeds, send_embeds
+        build_heatmap_embeds, build_interaction_embeds, build_newposts_embeds, send_embeds
     )
 
     # Get user's webhooks
@@ -677,6 +739,31 @@ async def trigger_discord_push(data: DiscordPushRequest, user_id: str = Depends(
 
     if not config:
         raise HTTPException(404, "No webhook configuration found")
+
+    # Handle "newposts" — push the new posts scan results to the posts webhook
+    if data.channel == "newposts":
+        webhook_url = config.get("discord_webhook_posts")
+        if not webhook_url:
+            raise HTTPException(400, "No posts webhook configured")
+        embeds = build_newposts_embeds(user_id)
+        print(f"[DEBUG] build_newposts_embeds returned {len(embeds)} embeds for user {user_id}", flush=True)
+        if embeds:
+            await send_embeds(webhook_url, embeds)
+            return {"message": f"Pushed {len(embeds)} new post embeds to Discord"}
+        else:
+            # Check what's in the DB for debugging
+            db2 = get_db()
+            try:
+                cur2 = db2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                key = make_newposts_status_key(user_id)
+                cur2.execute("SELECT value FROM system_status WHERE key = %s", (key,))
+                row = cur2.fetchone()
+                status_val = row['value'] if row and row['value'] else {}
+                np_count = len(status_val.get('new_posts', []))
+                print(f"[DEBUG] newposts status key={key}, new_posts count={np_count}, keys={list(status_val.keys())}", flush=True)
+            finally:
+                release_db(db2)
+            return {"message": "No new posts to push (new_posts list is empty in DB)"}
 
     channel_map = {
         "posts": ("discord_webhook_posts", build_post_embeds),
@@ -703,12 +790,11 @@ async def trigger_discord_push(data: DiscordPushRequest, user_id: str = Depends(
                 embeds = build_fn(user_id)
             else:
                 embeds = build_fn(user_id, interval_mins=1440)  # Look back 24h for manual trigger
-            
+
             if embeds:
                 await send_embeds(webhook_url, embeds)
                 sent += 1
             else:
-                # Manual trigger also sends "No data" message to Discord as requested
                 from discord_push import send_discord_async
                 channel_display = ch.capitalize()
                 pass
@@ -853,12 +939,12 @@ def run_manual_scrape_task(user_id):
     except Exception as e:
         print(f"❌ Manual scrape task error: {e}")
     finally:
-        # Clear is_running flag and reset activity
-        next_run = datetime.now(timezone.utc) + timedelta(minutes=interval_mins)
+        # Clear is_running flag, record finish time for 30-min cooldown
+        now_done = datetime.now(timezone.utc)
         update_system_status('twitter_scraper_status', {
             'is_running': False,
-            'next_run_at': next_run.isoformat(),
-            'current_activity': 'Monitor Idle - All KOLs up to date'
+            'heatmap_finished_at': now_done.isoformat(),
+            'current_activity': 'Heatmap scrape complete'
         }, user_id=user_id)
 
 
@@ -885,6 +971,27 @@ def get_dm_logs(user_id: str = Depends(get_current_user)):
             LIMIT 50
         """, (user_id,))
         return {"logs": cur.fetchall()}
+    finally:
+        release_db(db)
+
+
+@app.post("/api/dm_schedules")
+def save_dm_schedules(batch: DMScheduleBatch, user_id: str = Depends(get_current_user)):
+    """Batch update DM schedules for multiple KOLs."""
+    db = get_db()
+    try:
+        cur = db.cursor()
+        updated = 0
+        for item in batch.schedules:
+            cur.execute("""
+                UPDATE kols
+                SET dm_text = %s, dm_day = %s, dm_time = %s, updated_at = NOW()
+                WHERE id = %s AND user_id = %s
+            """, (item.dm_text or None, item.dm_day or None, item.dm_time or None,
+                  item.kol_id, user_id))
+            updated += cur.rowcount
+        db.commit()
+        return {"message": f"Updated {updated} DM schedule(s)", "updated": updated}
     finally:
         release_db(db)
 
