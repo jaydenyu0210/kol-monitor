@@ -68,6 +68,14 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ channel: 'newposts' })
   }),
+  saveTimezone: (timezone: string) => clientFetch<any>('/api/settings/timezone', {
+    method: 'POST',
+    body: JSON.stringify({ timezone })
+  }),
+  saveDMPasscode: (dm_passcode: string) => clientFetch<any>('/api/settings/dm_passcode', {
+    method: 'POST',
+    body: JSON.stringify({ dm_passcode })
+  }),
   getDMLogs: () => clientFetch<{ logs: any[] }>('/api/dm_logs'),
   saveDMSchedules: (schedules: { kol_id: number, dm_text: string | null, dm_day: string | null, dm_time: string | null }[]) =>
     clientFetch<any>('/api/dm_schedules', {

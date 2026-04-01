@@ -13,6 +13,8 @@ from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import SCRAPE_INTERVAL, DATABASE_URL
 
+_scheduler_instance = None  # Set in main(), used by run_dm_for_user to pause scraper
+
 def make_status_key(user_id=None):
     env_suffix = os.getenv("ENVIRONMENT_NAME", "Local").replace(" ", "_").lower()
     base = "twitter_scraper_status"
@@ -174,12 +176,132 @@ def run_newposts_scraper():
         except Exception as e:
             print(f"⚠️ New posts status completion error: {e}")
 
-def run_dm_scheduler():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Running DM Scheduler...")
+DM_RELOAD_SIGNAL = "/tmp/dm_schedules_reload"
+
+# Map full day names to APScheduler cron abbreviations
+DAY_NAME_TO_CRON = {
+    'monday': 'mon', 'tuesday': 'tue', 'wednesday': 'wed',
+    'thursday': 'thu', 'friday': 'fri', 'saturday': 'sat', 'sunday': 'sun'
+}
+
+def run_dm_for_user(user_id):
+    """Launch dm_scheduler.py for a specific user at their exact scheduled time."""
+    global _scheduler_instance
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 📨 DM scheduled — firing for user {user_id}...", flush=True)
+
+    # Pause the new posts scraper to avoid rate limiting during DM send
+    scraper_paused = False
+    if _scheduler_instance:
+        try:
+            _scheduler_instance.pause_job('newposts_scraper')
+            scraper_paused = True
+            print(f"[DM] ⏸️ Paused new posts scraper during DM send", flush=True)
+        except Exception:
+            pass
+
     try:
-        subprocess.run([sys.executable, "/app/dm_scheduler.py"], timeout=600)
+        env = os.environ.copy()
+        env["LIMIT_TO_USER_IDS"] = user_id
+        result = subprocess.run(
+            [sys.executable, "-u", "/app/dm_scheduler.py"],
+            timeout=600,
+            capture_output=True,
+            text=True,
+            env=env
+        )
+        if result.stdout:
+            for line in result.stdout.strip().split('\n'):
+                print(f"[DM] {line}", flush=True)
+        if result.stderr:
+            for line in result.stderr.strip().split('\n'):
+                print(f"[DM ERR] {line}", flush=True)
+        if result.returncode != 0:
+            print(f"❌ DM Scheduler exited with code {result.returncode}", flush=True)
     except Exception as e:
-        print(f"❌ DM Scheduler error: {e}")
+        print(f"❌ DM Scheduler error: {e}", flush=True)
+    finally:
+        # Resume the scraper
+        if scraper_paused and _scheduler_instance:
+            try:
+                _scheduler_instance.resume_job('newposts_scraper')
+                print(f"[DM] ▶️ Resumed new posts scraper", flush=True)
+            except Exception:
+                pass
+
+def load_dm_cron_jobs(scheduler):
+    """Read DM schedules from DB and create exact APScheduler cron jobs."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    # Remove all existing DM cron jobs
+    for job in scheduler.get_jobs():
+        if job.id.startswith('dm_cron_'):
+            scheduler.remove_job(job.id)
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT k.user_id, k.dm_time, k.dm_day, COALESCE(uc.timezone, 'UTC') as timezone
+            FROM kols k
+            JOIN user_configs uc ON k.user_id = uc.user_id
+            WHERE k.status = 'active'
+              AND k.dm_text IS NOT NULL AND k.dm_text != ''
+              AND k.dm_day IS NOT NULL AND k.dm_day != ''
+              AND k.dm_time IS NOT NULL AND k.dm_time != ''
+              AND uc.twitter_auth_token IS NOT NULL AND uc.twitter_auth_token != ''
+        """)
+        schedules = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Error loading DM schedules: {e}", flush=True)
+        return
+
+    if not schedules:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 📅 DM cron: No active DM schedules found.", flush=True)
+        return
+
+    # Group by (user_id, dm_time, timezone) — merge days across KOLs with the same time
+    from collections import defaultdict
+    grouped = defaultdict(set)  # key: (user_id, dm_time, tz) -> set of cron day abbreviations
+    for s in schedules:
+        user_id = str(s['user_id'])
+        dm_time = s['dm_time']
+        tz_name = s['timezone'] or 'UTC'
+        key = (user_id, dm_time, tz_name)
+        for day_name in s['dm_day'].split(','):
+            cron_day = DAY_NAME_TO_CRON.get(day_name.strip().lower())
+            if cron_day:
+                grouped[key].add(cron_day)
+
+    job_count = 0
+    for (user_id, dm_time, tz_name), cron_days in grouped.items():
+        parts = dm_time.split(':')
+        hour = int(parts[0])
+        minute = int(parts[1])
+        day_of_week = ','.join(sorted(cron_days))
+
+        try:
+            tz = ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, Exception):
+            tz = ZoneInfo("UTC")
+
+        job_id = f"dm_cron_{user_id}_{dm_time.replace(':', '')}"
+        scheduler.add_job(
+            run_dm_for_user,
+            'cron',
+            day_of_week=day_of_week,
+            hour=hour,
+            minute=minute,
+            timezone=tz,
+            id=job_id,
+            replace_existing=True,
+            max_instances=1,
+            args=[user_id]
+        )
+        job_count += 1
+        print(f"  📅 DM cron: user={user_id} time={dm_time} days={day_of_week} tz={tz_name}", flush=True)
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Loaded {job_count} DM cron job(s).", flush=True)
 
 def run_discord_push(job_type):
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Pushing {job_type.upper()} to Discord...")
@@ -250,21 +372,32 @@ async def sync_scheduler_status(scheduler):
                         'next_run_at': (now + timedelta(minutes=NEWPOSTS_INTERVAL)).isoformat()
                     }, user_id=user_id)
             conn.close()
+
+            # Check if DM schedules need reloading (signalled by API)
+            if os.path.exists(DM_RELOAD_SIGNAL):
+                os.remove(DM_RELOAD_SIGNAL)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 DM schedule change detected, reloading cron jobs...", flush=True)
+                load_dm_cron_jobs(scheduler)
+
         except Exception as e:
             print(f"⚠️ Status sync error: {e}")
         await asyncio.sleep(30)
 
 async def main():
+    global _scheduler_instance
     scheduler = AsyncIOScheduler()
+    _scheduler_instance = scheduler
 
     # Handle Scraper Toggle
     enabled = os.getenv("SCRAPER_ENABLED", "true").lower() == "true"
     if enabled:
         # New posts quick scan polls every 15s and self-selects due users (30-min cycle)
         scheduler.add_job(run_newposts_scraper, 'interval', seconds=15, id='newposts_scraper', max_instances=1)
-        # DM Scheduler runs every SCRAPE_INTERVAL minutes
-        scheduler.add_job(run_dm_scheduler, 'interval', minutes=SCRAPE_INTERVAL, id='dm_scheduler_job')
         scheduler.start()
+
+        # Load exact DM cron jobs from database (fires only at scheduled day+time)
+        load_dm_cron_jobs(scheduler)
+
         print(f"📅 KOL Monitor Scheduler Started [Heatmap=Manual, NewPosts={NEWPOSTS_INTERVAL}m cycle] [Env: {os.getenv('ENVIRONMENT_NAME', 'Local')}]")
     else:
         print(f"⏸️  KOL Monitor Scheduler DISABLED via SCRAPER_ENABLED=false [Env: {os.getenv('ENVIRONMENT_NAME', 'Local')}]")

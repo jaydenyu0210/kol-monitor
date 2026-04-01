@@ -6,3 +6,4 @@ playwright
 PyJWT[crypto]
 httpx
 python-dotenv
+tzdata

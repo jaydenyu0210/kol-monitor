@@ -80,6 +80,7 @@ def init_db():
             )
         """)
         cur.execute("ALTER TABLE user_configs ADD COLUMN IF NOT EXISTS scrape_interval_mins INT DEFAULT 30;")
+        cur.execute("ALTER TABLE user_configs ADD COLUMN IF NOT EXISTS dm_passcode TEXT;")
         
         # Ensure kols.user_id is TEXT to support Supabase UUIDs
         cur.execute("""
@@ -193,6 +194,7 @@ class UserConfigUpdate(BaseModel):
     discord_webhook_following: Optional[str] = None
     discord_webhook_followers: Optional[str] = None
     scrape_interval_mins: Optional[int] = None
+    timezone: Optional[str] = None
 
 
 # ---------- Status Sync Helper ----------
@@ -650,9 +652,12 @@ def get_settings(user_id: str = Depends(get_current_user)):
         cur.execute("SELECT * FROM user_configs WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         if not row:
-            return {"user_id": user_id, "has_cookies": False, "scrape_interval_mins": 30}
+            return {"user_id": user_id, "has_cookies": False, "scrape_interval_mins": 30, "timezone": None}
         row["has_cookies"] = bool(row.get("twitter_auth_token"))
+        row["has_dm_passcode"] = bool(row.get("dm_passcode"))
         row["scrape_interval_mins"] = row.get("scrape_interval_mins") or 30
+        # timezone: None means "not explicitly set" (auto-detection should kick in)
+        row["timezone"] = row.get("timezone") or None
         return row
     finally:
         release_db(db)
@@ -679,6 +684,12 @@ def save_webhooks(data: UserConfigUpdate, user_id: str = Depends(get_current_use
                 updated_at = now()
         """, (user_id, data.discord_webhook_posts, data.discord_webhook_interactions,
               data.discord_webhook_heatmap, data.discord_webhook_following, data.discord_webhook_followers, interval_mins))
+        # Save timezone if provided
+        if data.timezone:
+            cur.execute("""
+                INSERT INTO user_configs (user_id, timezone) VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET timezone = EXCLUDED.timezone, updated_at = now()
+            """, (user_id, data.timezone))
         db.commit()
 
         # Restart the user's scrape timer with the newly saved interval
@@ -821,6 +832,47 @@ def save_cookies(data: CookieSave, user_id: str = Depends(get_current_user)):
         """, (user_id, data.auth_token, data.ct0, data.auth_token, data.ct0))
         db.commit()
         return {"message": "X cookies saved"}
+    finally:
+        release_db(db)
+
+
+class TimezoneSave(BaseModel):
+    timezone: str
+
+@app.post("/api/settings/timezone")
+def save_timezone(data: TimezoneSave, user_id: str = Depends(get_current_user)):
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        ZoneInfo(data.timezone)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(400, f"Invalid timezone: {data.timezone}")
+    db = get_db()
+    try:
+        cur = db.cursor()
+        cur.execute("""
+            INSERT INTO user_configs (user_id, timezone) VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET timezone = EXCLUDED.timezone, updated_at = now()
+        """, (user_id, data.timezone))
+        db.commit()
+        return {"message": "Timezone saved"}
+    finally:
+        release_db(db)
+
+
+class DMPasscodeSave(BaseModel):
+    dm_passcode: str
+
+@app.post("/api/settings/dm_passcode")
+def save_dm_passcode(data: DMPasscodeSave, user_id: str = Depends(get_current_user)):
+    db = get_db()
+    try:
+        cur = db.cursor()
+        cur.execute("""
+            INSERT INTO user_configs (user_id, dm_passcode) VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET dm_passcode = EXCLUDED.dm_passcode, updated_at = now()
+        """, (user_id, data.dm_passcode))
+        db.commit()
+        return {"message": "DM passcode saved"}
     finally:
         release_db(db)
 
@@ -991,6 +1043,14 @@ def save_dm_schedules(batch: DMScheduleBatch, user_id: str = Depends(get_current
                   item.kol_id, user_id))
             updated += cur.rowcount
         db.commit()
+
+        # Signal the scheduler to reload DM cron jobs
+        try:
+            with open("/tmp/dm_schedules_reload", "w") as f:
+                f.write("reload")
+        except Exception:
+            pass
+
         return {"message": f"Updated {updated} DM schedule(s)", "updated": updated}
     finally:
         release_db(db)

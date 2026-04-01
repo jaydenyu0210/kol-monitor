@@ -4,6 +4,7 @@ import { LogOut } from 'lucide-react'
 import Link from 'next/link'
 import DashboardNav from '@/components/DashboardNav'
 import ScrapeTimer from '@/components/ScrapeTimer'
+import TimezoneSync from '@/components/TimezoneSync'
 
 export default async function DashboardLayout({
   children,
@@ -48,6 +49,9 @@ export default async function DashboardLayout({
             </div>
           </div>
         </div>
+
+        {/* Auto-detect and save browser timezone on first visit */}
+        <TimezoneSync />
 
         {/* Navigation Tabs */}
         <DashboardNav />

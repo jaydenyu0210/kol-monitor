@@ -1,9 +1,13 @@
 import DiscordSettingsForm from '@/components/DiscordSettingsForm'
 import CookieSettingsForm from '@/components/CookieSettingsForm'
-import { 
-  Bell, 
+import TimezoneSettingsForm from '@/components/TimezoneSettingsForm'
+import DMPasscodeForm from '@/components/DMPasscodeForm'
+import {
+  Bell,
   Key,
-  Settings
+  Lock,
+  Settings,
+  Globe
 } from 'lucide-react'
 
 export default function SettingsPage() {
@@ -46,6 +50,26 @@ export default function SettingsPage() {
         </div>
 
         <div className="space-y-8">
+           {/* Timezone */}
+           <div className="bg-[#1e293b] border border-[#334155] rounded-xl p-6 shadow-xl border-l-4 border-l-blue-400">
+             <h3 className="font-bold text-white mb-1 flex items-center gap-2">
+               <Globe className="w-4 h-4 text-blue-400" />
+               Timezone
+             </h3>
+             <p className="text-xs text-slate-500 mb-4 italic">Used for DM scheduling. Set to your local timezone.</p>
+             <TimezoneSettingsForm />
+           </div>
+
+           {/* DM Passcode */}
+           <div className="bg-[#1e293b] border border-[#334155] rounded-xl p-6 shadow-xl border-l-4 border-l-amber-500">
+             <h3 className="font-bold text-white mb-1 flex items-center gap-2">
+               <Lock className="w-4 h-4 text-amber-400" />
+               X DM Passcode
+             </h3>
+             <p className="text-xs text-slate-500 mb-4 italic">Required for the DM scheduler to send messages.</p>
+             <DMPasscodeForm />
+           </div>
+
            {/* Discord Notifications */}
            <div className="bg-[#1e293b] border border-[#334155] rounded-xl p-6 shadow-xl border-l-4 border-l-purple-500">
              <h3 className="font-bold text-white mb-4 flex items-center gap-2">
