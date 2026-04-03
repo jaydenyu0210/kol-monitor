@@ -71,9 +71,43 @@ async def handle_passcode_overlay(page, passcode):
                 return False
 
             print(f"    [DM] Passcode dialog detected, entering passcode...")
-            for digit in passcode:
-                await page.keyboard.press(digit)
+
+            # Try to find and focus the passcode input element first
+            passcode_input = None
+            for selector in [
+                'input[type="password"]',
+                'input[type="tel"]',
+                'input[type="number"]',
+                'input[data-testid*="passcode"]',
+                'input[data-testid*="Passcode"]',
+                'input[autocomplete="one-time-code"]',
+                'input',
+            ]:
+                loc = page.locator(selector).first
+                try:
+                    if await loc.count() > 0 and await loc.is_visible():
+                        passcode_input = loc
+                        print(f"    [DM] Found passcode input via: {selector}")
+                        break
+                except:
+                    continue
+
+            if passcode_input:
+                await passcode_input.click()
                 await page.wait_for_timeout(300)
+                await passcode_input.type(passcode, delay=200)
+            else:
+                # Fallback: click the center of the page to focus, then type
+                print(f"    [DM] No specific passcode input found, clicking page center and typing...")
+                await page.click("text=Enter Passcode")
+                await page.wait_for_timeout(500)
+                for digit in passcode:
+                    await page.keyboard.press(digit)
+                    await page.wait_for_timeout(300)
+
+            await page.wait_for_timeout(1000)
+            await page.screenshot(path="/tmp/dm_debug_after_passcode_entry.png")
+            print(f"    [DM] Passcode digits entered, waiting for acceptance...")
 
             # Wait for passcode to be accepted — poll up to 10 seconds
             import time as _time
@@ -107,87 +141,83 @@ async def handle_passcode_overlay(page, passcode):
         return False
 
 
-async def find_existing_conversation(page, handle):
+async def find_existing_conversation(page, handle, display_name=None):
     """
     Check if the target user already appears in the chat list sidebar.
     Returns the clickable conversation row element if found, None otherwise.
     """
-    print(f"    [DM] Checking if @{handle} exists in chat list...")
+    print(f"    [DM] Checking if @{handle} exists in chat list (display_name={display_name})...")
 
     # Debug: dump conversation list structure
     try:
         conv_debug = await page.evaluate("""() => {
-            const convs = document.querySelectorAll('[data-testid="conversation"]');
-            const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]');
-            const links = document.querySelectorAll('a[href*="/messages/"]');
+            const convs = document.querySelectorAll('[data-testid^="dm-conversation-item"]');
+            const links = document.querySelectorAll('a[href*="/i/chat/"]');
             return {
                 conversations: convs.length,
-                cellInnerDivs: cells.length,
-                messageLinks: links.length,
-                convTexts: Array.from(convs).slice(0, 10).map(c => c.innerText.substring(0, 100)),
-                linkTexts: Array.from(links).slice(0, 10).map(l => ({href: l.href, text: l.innerText.substring(0, 100)}))
+                chatLinks: links.length,
+                convAria: Array.from(convs).slice(0, 10).map(c => c.getAttribute('aria-description') || ''),
+                linkTexts: Array.from(links).slice(0, 10).map(l => ({href: l.href, text: (l.innerText || '').substring(0, 100)}))
             };
         }""")
         print(f"    [DM] Chat list debug: {conv_debug}")
     except Exception as e:
         print(f"    [DM] Chat list debug error: {e}")
 
-    # Strategy 1: Look for conversation rows with data-testid="conversation" containing the handle
-    # Click the conversation row itself (the <a> or container), not the text node
+    # Strategy 1: Find dm-conversation-item by aria-description containing @handle
     try:
-        convs = page.locator('[data-testid="conversation"]')
+        convs = page.locator('[data-testid^="dm-conversation-item"]')
         count = await convs.count()
-        print(f"    [DM] Found {count} conversation(s) with data-testid='conversation'")
+        print(f"    [DM] Found {count} dm-conversation-item(s)")
         for i in range(min(count, 20)):
             conv = convs.nth(i)
             try:
-                text = await conv.inner_text()
-                if f"@{handle}" in text or handle.lower() in text.lower():
-                    print(f"    [DM] ✅ Found @{handle} in conversation #{i+1} (data-testid)")
+                aria = await conv.get_attribute("aria-description") or ""
+                if f"@{handle}" in aria:
+                    print(f"    [DM] ✅ Found @{handle} in conversation #{i+1} via aria-description")
+                    # Click the <a> link inside the conversation item
+                    link = conv.locator('a[href*="/i/chat/"]').first
+                    if await link.count() > 0:
+                        return link
                     return conv
             except:
                 continue
     except Exception as e:
-        print(f"    [DM] Error checking conversations: {e}")
+        print(f"    [DM] Error checking dm-conversation-items: {e}")
 
-    # Strategy 2: Look for <a> links to /messages/ that contain the handle
+    # Strategy 2: Find conversation item containing avatar link to the handle's profile
     try:
-        links = page.locator('a[href*="/messages/"]')
+        avatar_link = page.locator(f'a[href="https://x.com/{handle}"], a[href="/{handle}"]').first
+        if await avatar_link.count() > 0:
+            print(f"    [DM] ✅ Found avatar link for @{handle}")
+            # Navigate up to the conversation item, then find the chat link
+            conv_item = page.locator(f'[data-testid^="dm-conversation-item"]:has(a[href="https://x.com/{handle}"])')
+            if await conv_item.count() > 0:
+                link = conv_item.first.locator('a[href*="/i/chat/"]').first
+                if await link.count() > 0:
+                    return link
+                return conv_item.first
+    except Exception as e:
+        print(f"    [DM] Error checking avatar links: {e}")
+
+    # Strategy 3: Fallback — check innerText + aria-description on any chat links
+    try:
+        links = page.locator('a[href*="/i/chat/"]')
         count = await links.count()
-        print(f"    [DM] Found {count} message link(s)")
+        print(f"    [DM] Found {count} chat link(s)")
         for i in range(min(count, 20)):
             link = links.nth(i)
             try:
                 text = await link.inner_text()
-                if f"@{handle}" in text or handle.lower() in text.lower():
-                    print(f"    [DM] ✅ Found @{handle} in message link #{i+1}")
+                aria = await link.get_attribute("aria-description") or ""
+                combined = f"{text} {aria}".lower()
+                if handle.lower() in combined or (display_name and display_name.lower() in combined):
+                    print(f"    [DM] ✅ Found @{handle} in chat link #{i+1}")
                     return link
             except:
                 continue
     except Exception as e:
-        print(f"    [DM] Error checking message links: {e}")
-
-    # Strategy 3: Look for cellInnerDiv containers
-    try:
-        cells = page.locator('[data-testid="cellInnerDiv"]')
-        count = await cells.count()
-        print(f"    [DM] Found {count} cellInnerDiv(s)")
-        for i in range(min(count, 20)):
-            cell = cells.nth(i)
-            try:
-                text = await cell.inner_text()
-                if f"@{handle}" in text or handle.lower() in text.lower():
-                    # Try to find the clickable <a> inside this cell
-                    inner_link = cell.locator('a[href*="/messages/"]').first
-                    if await inner_link.count() > 0:
-                        print(f"    [DM] ✅ Found @{handle} in cellInnerDiv #{i+1} (clicking inner link)")
-                        return inner_link
-                    print(f"    [DM] ✅ Found @{handle} in cellInnerDiv #{i+1} (clicking cell)")
-                    return cell
-            except:
-                continue
-    except Exception as e:
-        print(f"    [DM] Error checking cells: {e}")
+        print(f"    [DM] Error checking chat links: {e}")
 
     print(f"    [DM] @{handle} not found in existing chat list.")
     return None
@@ -268,9 +298,12 @@ async def find_composer(page, handle):
     print(f"    [DM] Debug: contenteditable={ce_count}, role=textbox={tb_count}")
 
     for selector in [
+        '[data-testid="dmComposerTextInput"]',
+        'input[placeholder="Message"]',
         'textarea[data-testid="dm-composer-textarea"]',
         'textarea[placeholder="Message"]',
-        '[data-testid="dmComposerTextInput"]',
+        '[data-testid="DmComposer_TextInput"]',
+        'div[role="textbox"][data-testid="dmComposerTextInput"]',
         'div[role="textbox"]',
         'div[contenteditable="true"]',
     ]:
@@ -300,7 +333,7 @@ async def find_composer(page, handle):
     return None
 
 
-async def send_dm(page, handle, message, passcode=None):
+async def send_dm(page, handle, message, passcode=None, display_name=None):
     """
     Send a DM via X/Twitter using automatic method detection:
     - Method A (new chat): For users not in the chat list — uses "New chat" dialog flow
@@ -338,10 +371,9 @@ async def send_dm(page, handle, message, passcode=None):
         chat_list_loaded = False
         while _time.time() - chat_wait_start < 15:  # Wait up to 15 seconds
             conv_count = await page.evaluate("""() => {
-                const convs = document.querySelectorAll('[data-testid="conversation"]');
-                const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]');
-                const links = document.querySelectorAll('a[href*="/messages/"]');
-                return convs.length + cells.length + links.length;
+                const convs = document.querySelectorAll('[data-testid^="dm-conversation-item"]');
+                const links = document.querySelectorAll('a[href*="/i/chat/"]');
+                return convs.length + links.length;
             }""")
             if conv_count > 0:
                 print(f"    [DM] Chat list loaded ({conv_count} elements) after {_time.time() - chat_wait_start:.1f}s")
@@ -350,53 +382,47 @@ async def send_dm(page, handle, message, passcode=None):
             await page.wait_for_timeout(1000)
 
         if not chat_list_loaded:
-            print(f"    [DM] Chat list still empty after 15s — dumping page structure...")
-            # Dump broader DOM to understand new chat UI structure
-            dom_debug = await page.evaluate("""() => {
-                const body = document.body;
-                // Find all elements with data-testid
-                const testids = document.querySelectorAll('[data-testid]');
-                const testidList = Array.from(testids).slice(0, 50).map(el => el.getAttribute('data-testid'));
-                // Find all <a> links
-                const links = document.querySelectorAll('a[href]');
-                const linkList = Array.from(links).slice(0, 30).map(l => ({href: l.href, text: l.innerText.substring(0, 60)}));
-                // Find all role attributes
-                const roles = document.querySelectorAll('[role]');
-                const roleList = Array.from(roles).slice(0, 30).map(r => ({role: r.getAttribute('role'), tag: r.tagName, text: r.innerText.substring(0, 40)}));
-                // All divs with click handlers (indirect — check for cursor style)
-                const clickable = document.querySelectorAll('div[tabindex], div[role="button"], div[role="link"]');
-                const clickableList = Array.from(clickable).slice(0, 20).map(c => ({role: c.getAttribute('role'), text: c.innerText.substring(0, 60)}));
-                return {url: window.location.href, testids: testidList, links: linkList, roles: roleList, clickable: clickableList};
-            }""")
-            print(f"    [DM] URL: {dom_debug.get('url')}")
-            print(f"    [DM] Test IDs: {dom_debug.get('testids')}")
-            print(f"    [DM] Links: {dom_debug.get('links')}")
-            print(f"    [DM] Clickable: {dom_debug.get('clickable')}")
+            print(f"    [DM] Chat list empty after 15s (may be empty inbox — proceeding to send).")
+            try:
+                dom_debug = await page.evaluate("""() => {
+                    const testids = document.querySelectorAll('[data-testid]');
+                    const testidList = Array.from(testids).slice(0, 50).map(el => el.getAttribute('data-testid'));
+                    const links = document.querySelectorAll('a[href]');
+                    const linkList = Array.from(links).slice(0, 30).map(l => ({href: l.href, text: (l.innerText || '').substring(0, 60)}));
+                    const clickable = document.querySelectorAll('div[tabindex], div[role="button"], div[role="link"]');
+                    const clickableList = Array.from(clickable).slice(0, 20).map(c => ({role: c.getAttribute('role'), text: (c.innerText || '').substring(0, 60)}));
+                    return {url: window.location.href, testids: testidList, links: linkList, clickable: clickableList};
+                }""")
+                print(f"    [DM] URL: {dom_debug.get('url')}")
+                print(f"    [DM] Test IDs: {dom_debug.get('testids')}")
+                print(f"    [DM] Links: {dom_debug.get('links')}")
+                print(f"    [DM] Clickable: {dom_debug.get('clickable')}")
+            except Exception as e:
+                print(f"    [DM] DOM debug dump failed: {e}")
 
         await page.screenshot(path=f"/tmp/dm_debug_{handle}_chat_list.png")
 
         # Step 4: Auto-detect — check if user already exists in chat list
         step = "detect_method"
-        existing_conv = await find_existing_conversation(page, handle)
+        existing_conv = await find_existing_conversation(page, handle, display_name=display_name)
 
         if existing_conv:
             # Method B: Existing conversation
             print(f"    [DM] Using Method B (existing conversation) for @{handle}")
             return await send_dm_existing_conversation(page, handle, message, existing_conv)
 
-        # Method A: New chat flow
+        # Method A: New chat flow — click "New chat" button on current page (avoids re-triggering passcode)
         print(f"    [DM] Using Method A (new chat) for @{handle}")
 
-        # Step 4: Click the "New chat" button on the messages page
         step = "new_chat_btn"
-        print(f"    [DM] Looking for 'New chat' button...")
+        print(f"    [DM] Looking for 'New chat' button on current page...")
         new_chat_btn = None
         for selector in [
             'button:has-text("New chat")',
             '[data-testid="NewDM_Button"]',
-            'a[href="/messages/compose"]',
-            '[aria-label="New message"]',
+            ':is(div, span, a)[role="button"]:has-text("New chat")',
             'button:has-text("New message")',
+            ':is(div, span, a)[role="button"]:has-text("New message")',
         ]:
             loc = page.locator(selector).first
             try:
@@ -408,8 +434,40 @@ async def send_dm(page, handle, message, passcode=None):
                 continue
 
         if not new_chat_btn:
+            # Fallback: try the compose icon/button (the pen/write icon)
+            for selector in [
+                '[data-testid="NewDM_Button"]',
+                'a[href*="/compose"]',
+                '[aria-label="Compose a DM"]',
+                '[aria-label="New message"]',
+            ]:
+                loc = page.locator(selector).first
+                try:
+                    await loc.wait_for(state="visible", timeout=2000)
+                    new_chat_btn = loc
+                    print(f"    [DM] Found compose icon via: {selector}")
+                    break
+                except:
+                    continue
+
+        if not new_chat_btn:
             await page.screenshot(path=f"/tmp/dm_fail_{handle}_no_newchat.png")
-            print(f"    [DM] ❌ No 'New chat' button found on messages page")
+            print(f"    [DM] ❌ No 'New chat' button found on messages page. URL: {page.url}")
+            # Dump what's on the page for debugging
+            try:
+                btns = await page.evaluate("""() => {
+                    const buttons = document.querySelectorAll('button, [role="button"], a[href]');
+                    return Array.from(buttons).slice(0, 30).map(b => ({
+                        tag: b.tagName,
+                        text: (b.innerText || '').substring(0, 50),
+                        href: b.getAttribute('href') || '',
+                        testid: b.getAttribute('data-testid') || '',
+                        label: b.getAttribute('aria-label') || ''
+                    }));
+                }""")
+                print(f"    [DM] Buttons on page: {btns}")
+            except Exception as e:
+                print(f"    [DM] Button debug failed: {e}")
             return False
 
         await new_chat_btn.click()
@@ -678,7 +736,7 @@ async def main():
                         handle = kol['twitter_url'].split('/')[-1] if kol['twitter_url'] else kol['name']
                         print(f"  ✉️ [{idx+1}/{len(user_dms)}] Sending DM to @{handle} (KOL: {kol['name']})...")
                         
-                        success = await send_dm(page, handle, kol['dm_text'], passcode=user_dm_passcode)
+                        success = await send_dm(page, handle, kol['dm_text'], passcode=user_dm_passcode, display_name=kol.get('name'))
                         
                         # Log attempt
                         cur.execute("""
