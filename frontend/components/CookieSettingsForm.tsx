@@ -1,16 +1,29 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { api } from '@/lib/api-client'
 import { Key, Save, Loader2, CheckCircle2 } from 'lucide-react'
 
 export default function CookieSettingsForm() {
   const [loading, setLoading] = useState(false)
   const [success, setSuccess] = useState(false)
+  const [hasCookies, setHasCookies] = useState<boolean | null>(null)
   const [formData, setFormData] = useState({
     auth_token: '',
     ct0: ''
   })
+
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const data = await api.getSettings()
+        setHasCookies(!!data.has_cookies)
+      } catch {
+        setHasCookies(false)
+      }
+    }
+    fetchStatus()
+  }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -19,6 +32,7 @@ export default function CookieSettingsForm() {
     try {
       await api.saveCookies(formData)
       setSuccess(true)
+      setHasCookies(true)
       setFormData({ auth_token: '', ct0: '' })
     } catch (err) {
       console.error('Failed to save cookies', err)
@@ -28,11 +42,13 @@ export default function CookieSettingsForm() {
     }
   }
 
+  const isSaved = success || hasCookies === true
+
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div className="flex items-center gap-2 mb-2">
-         <span className={`text-[10px] px-2 py-0.5 rounded border font-bold uppercase tracking-wider ${success ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-slate-700/50 text-slate-500 border-slate-700/50'}`}>
-            Status: {success ? 'Updated' : 'Not Saved'}
+         <span className={`text-[10px] px-2 py-0.5 rounded border font-bold uppercase tracking-wider ${isSaved ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-slate-700/50 text-slate-500 border-slate-700/50'}`}>
+            Status: {success ? 'Updated' : isSaved ? 'Saved' : 'Not Saved'}
          </span>
       </div>
       

@@ -8,13 +8,15 @@ import {
   Zap,
   ExternalLink,
   Loader2,
-  Radio
+  Radio,
+  ArrowUpDown
 } from 'lucide-react'
 
 export default function DiscordFeed() {
   const [data, setData] = useState<any>(null)
   const [newPostsStatus, setNewPostsStatus] = useState<NewPostsScrapeStatus | null>(null)
   const [loading, setLoading] = useState(true)
+  const [sortNewestFirst, setSortNewestFirst] = useState(true)
 
   const fetchData = async () => {
     try {
@@ -53,8 +55,13 @@ export default function DiscordFeed() {
   const hotPosts = data?.hot_posts?.items || (Array.isArray(data?.hot_posts) ? data.hot_posts : [])
   const interactions = data?.interactions?.items || (Array.isArray(data?.interactions) ? data.interactions : [])
 
-  // New posts from the 30-min quick scan
-  const newPosts = newPostsStatus?.new_posts || []
+  // New posts from the 30-min quick scan, sorted by posted time
+  const newPostsRaw = newPostsStatus?.new_posts || []
+  const newPosts = [...newPostsRaw].sort((a: any, b: any) => {
+    const ta = new Date(a.posted_at).getTime()
+    const tb = new Date(b.posted_at).getTime()
+    return sortNewestFirst ? tb - ta : ta - tb
+  })
   const npIsRunning = !!newPostsStatus?.is_running
   const npFinished = newPostsStatus?.finished_at
 
@@ -68,6 +75,14 @@ export default function DiscordFeed() {
             <Radio className="w-5 h-5 mr-2 text-green-400" /> New Posts (30-min Scan)
           </h3>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setSortNewestFirst(prev => !prev)}
+              className="text-[10px] text-slate-400 hover:text-white bg-[#0f172a] hover:bg-[#334155] px-2 py-1 rounded border border-[#334155] transition-colors flex items-center gap-1"
+            >
+              <ArrowUpDown className="w-3 h-3" />
+              {sortNewestFirst ? 'Newest' : 'Oldest'}
+            </button>
             {npIsRunning ? (
               <span className="text-[10px] text-green-300 bg-green-500/10 border border-green-500/30 px-2 py-1 rounded font-bold flex items-center gap-1.5 animate-pulse">
                 <Loader2 className="w-3 h-3 animate-spin" />

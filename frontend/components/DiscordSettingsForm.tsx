@@ -78,21 +78,6 @@ export default function DiscordSettingsForm() {
   return (
     <form onSubmit={handleSave} className="space-y-4 animate-in fade-in duration-500">
       <div className="space-y-4">
-        <div className="space-y-1">
-          <label className="text-[10px] text-slate-500 uppercase font-bold mb-1 block tracking-widest">
-            Scrape Interval
-          </label>
-          <select
-            className="w-full bg-[#0f172a] border border-[#334155] rounded-xl px-4 py-2 text-xs text-white focus:border-purple-500 focus:outline-none transition-all"
-            value={configs.scrape_interval_mins}
-            onChange={(e) => setConfigs({ ...configs, scrape_interval_mins: Number(e.target.value) })}
-          >
-            {[5, 10, 30].map((v) => (
-              <option key={v} value={v}>{v} minutes</option>
-            ))}
-          </select>
-        </div>
-
         <WebhookInput
           label="New Posts Webhook"
           value={configs.discord_webhook_posts}
